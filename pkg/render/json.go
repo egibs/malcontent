@@ -29,30 +29,8 @@ func (r JSON) File(_ context.Context, _ *malcontent.FileReport) error {
 }
 
 func (r JSON) Full(_ context.Context, rep *malcontent.Report) error {
-	jr := Report{
-		Diff:   rep.Diff,
-		Files:  make(map[string]*malcontent.FileReport),
-		Filter: "",
-	}
-
-	rep.Files.Range(func(key, value any) bool {
-		if key == nil || value == nil {
-			return true
-		}
-		if path, ok := key.(string); ok {
-			if r, ok := value.(*malcontent.FileReport); ok {
-				if r.Skipped == "" {
-					// Filter out diff-related fields
-					r.ArchiveRoot = ""
-					r.FullPath = ""
-					jr.Files[path] = r
-				}
-			}
-		}
-		return true
-	})
-
-	j, err := json.MarshalIndent(jr, "", "    ")
+	rep.Filter = ""
+	j, err := json.MarshalIndent(rep, "", "    ")
 	if err != nil {
 		return err
 	}

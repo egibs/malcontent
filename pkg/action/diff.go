@@ -90,23 +90,21 @@ func relFileReport(ctx context.Context, c malcontent.Config, fromPath string) (m
 	}
 	fromRelPath := map[string]*malcontent.FileReport{}
 	var base, rel string
-	fromReport.Files.Range(func(key, value any) bool {
-		if key == nil || value == nil {
-			return true
+
+	for path, fr := range fromReport.Files {
+		if path == "" || fr == nil {
+			continue
 		}
-		if fr, ok := value.(*malcontent.FileReport); ok {
-			isArchive := fr.ArchiveRoot != ""
-			if fr.Skipped != "" || fr.Error != "" {
-				return true
-			}
-			rel, base, err = relPath(fromPath, fr, isArchive)
-			if err != nil {
-				return false
-			}
-			fromRelPath[rel] = fr
+		isArchive := fr.ArchiveRoot != ""
+		if fr.Skipped != "" || fr.Error != "" {
+			continue
 		}
-		return true
-	})
+		rel, base, err = relPath(fromPath, fr, isArchive)
+		if err != nil {
+			return nil, "", err
+		}
+		fromRelPath[rel] = fr
+	}
 
 	return fromRelPath, base, nil
 }

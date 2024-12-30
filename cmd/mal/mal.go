@@ -16,7 +16,6 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/chainguard-dev/malcontent/pkg/malcontent"
@@ -541,14 +540,7 @@ func main() {
 						return fmt.Errorf("scan: %w", err)
 					}
 
-					length := func(m *sync.Map) int {
-						length := 0
-						m.Range(func(_, _ any) bool {
-							length++
-							return true
-						})
-						return length
-					}(&res.Files)
+					length := len(res.Files)
 
 					err = renderer.Full(ctx, res)
 					if err != nil {

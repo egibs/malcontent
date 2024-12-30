@@ -117,9 +117,82 @@ type DiffReport struct {
 }
 
 type Report struct {
-	Files  sync.Map    `json:",omitempty" yaml:",omitempty"`
-	Diff   *DiffReport `json:",omitempty" yaml:",omitempty"`
-	Filter string      `json:",omitempty" yaml:",omitempty"`
+	Files  map[string]*FileReport `json:",omitempty" yaml:",omitempty"`
+	Diff   *DiffReport            `json:",omitempty" yaml:",omitempty"`
+	Filter string                 `json:",omitempty" yaml:",omitempty"`
+}
+
+type ReportBuilder struct {
+	files  sync.Map
+	diff   *DiffReport
+	filter string
+}
+
+func NewReportBuilder() *ReportBuilder {
+	return &ReportBuilder{}
+}
+
+func (rb *ReportBuilder) AddDiff(diff *DiffReport) {
+	rb.diff = diff
+}
+
+func (rb *ReportBuilder) AddFile(path string, report *FileReport) {
+	rb.files.Store(path, report)
+}
+
+func (rb *ReportBuilder) AddFilter(filter string) {
+	rb.filter = filter
+}
+
+func (rb *ReportBuilder) RangeFiles(fn func(path string, report *FileReport) bool) {
+	rb.files.Range(func(key, value any) bool {
+		if path, ok := key.(string); ok {
+			if report, ok := value.(*FileReport); ok {
+				return fn(path, report)
+			}
+		}
+		return true
+	})
+}
+
+func (rb *ReportBuilder) CountMatchingFiles(pred func(*FileReport) bool) (filesScanned int, matchCount int) {
+	rb.files.Range(func(_, value any) bool {
+		if fr, ok := value.(*FileReport); ok {
+			if fr.Skipped != "" || fr.Error != "" {
+				return true
+			}
+			filesScanned++
+			if pred(fr) {
+				matchCount++
+			}
+		}
+		return true
+	})
+	return
+}
+
+func (rb *ReportBuilder) Build() *Report {
+	files := make(map[string]*FileReport)
+
+	rb.files.Range(func(key, value any) bool {
+		if path, ok := key.(string); ok {
+			if r, ok := value.(*FileReport); ok {
+				if r.Skipped == "" {
+					rc := *r
+					rc.ArchiveRoot = ""
+					rc.FullPath = ""
+					files[path] = &rc
+				}
+			}
+		}
+		return true
+	})
+
+	return &Report{
+		Files:  files,
+		Diff:   rb.diff,
+		Filter: rb.filter,
+	}
 }
 
 type IntMetric struct {

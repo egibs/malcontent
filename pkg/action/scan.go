@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 
@@ -185,62 +184,33 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 }
 
 // errIfMatch generates the right error if a match is encountered.
-func exitIfHitOrMiss(frs *sync.Map, scanPath string, errIfHit bool, errIfMiss bool) (*malcontent.FileReport, error) {
-	var (
-		bList []string
-		bMap  sync.Map
-		count int
-		match *malcontent.FileReport
-	)
-	if frs == nil {
+func exitIfHitOrMiss(rb *malcontent.ReportBuilder, scanPath string, errIfHit bool, errIfMiss bool) (*malcontent.FileReport, error) {
+	if rb == nil {
 		return nil, nil
 	}
 
-	filesScanned := 0
-
-	frs.Range(func(_, value any) bool {
-		if value == nil {
-			return true
-		}
-		if fr, ok := value.(*malcontent.FileReport); ok {
-			if fr.Skipped != "" {
-				return true
-			}
-			if fr.Error != "" {
-				return true
-			}
-			filesScanned++
-			if len(fr.Behaviors) > 0 && match == nil {
-				match = fr
-			}
-			for _, b := range fr.Behaviors {
-				count++
-				bMap.Store(b.ID, true)
-			}
-		}
-		return true
+	filesScanned, matchCount := rb.CountMatchingFiles(func(fr *malcontent.FileReport) bool {
+		return len(fr.Behaviors) > 0
 	})
-
-	bMap.Range(func(key, _ any) bool {
-		if key == nil {
-			return true
-		}
-		if k, ok := key.(string); ok {
-			bList = append(bList, k)
-		}
-		return true
-	})
-	sort.Strings(bList)
 
 	if filesScanned == 0 {
 		return nil, nil
 	}
 
-	if errIfHit && count != 0 {
+	if errIfHit && matchCount > 0 {
+		// Find first match for reporting
+		var match *malcontent.FileReport
+		rb.RangeFiles(func(_ string, fr *malcontent.FileReport) bool {
+			if len(fr.Behaviors) > 0 {
+				match = fr
+				return false
+			}
+			return true
+		})
 		return match, fmt.Errorf("%s %w", scanPath, ErrMatchedCondition)
 	}
 
-	if errIfMiss && count == 0 {
+	if errIfMiss && matchCount == 0 {
 		return nil, fmt.Errorf("%s %w", scanPath, ErrMatchedCondition)
 	}
 	return nil, nil
@@ -266,14 +236,12 @@ func CachedRules(ctx context.Context, fss []fs.FS) (*yara.Rules, error) {
 
 // recursiveScan recursively YARA scans the configured paths - handling archives and OCI images.
 //
-//nolint:gocognit,cyclop,nestif // ignoring complexity of 101,38
+//nolint:gocognit,cyclop // ignoring complexity of 101,38
 func recursiveScan(ctx context.Context, c malcontent.Config) (*malcontent.Report, error) {
 	logger := clog.FromContext(ctx)
-	r := &malcontent.Report{
-		Files: sync.Map{},
-	}
+	b := malcontent.NewReportBuilder()
 	if len(c.IgnoreTags) > 0 {
-		r.Filter = strings.Join(c.IgnoreTags, ",")
+		b.AddFilter(strings.Join(c.IgnoreTags, ","))
 	}
 
 	// Store the first hit or miss result
@@ -332,7 +300,7 @@ func recursiveScan(ctx context.Context, c malcontent.Config) (*malcontent.Report
 			}
 
 			if !c.OCI && (c.ExitFirstHit || c.ExitFirstMiss) {
-				match, err := exitIfHitOrMiss(frs, path, c.ExitFirstHit, c.ExitFirstMiss)
+				match, err := exitIfHitOrMiss(b, path, c.ExitFirstHit, c.ExitFirstMiss) // Updated to pass builder
 				if err != nil {
 					matchOnce.Do(func() {
 						matchChan <- matchResult{fr: match, err: err}
@@ -341,27 +309,18 @@ func recursiveScan(ctx context.Context, c malcontent.Config) (*malcontent.Report
 				}
 			}
 
-			if frs != nil {
-				frs.Range(func(key, value any) bool {
-					if key == nil || value == nil {
-						return true
+			frs.RangeFiles(func(k string, fr *malcontent.FileReport) bool {
+				if len(c.TrimPrefixes) > 0 {
+					k = report.TrimPrefixes(k, c.TrimPrefixes)
+				}
+				b.AddFile(k, fr)
+				if c.Renderer != nil && b.Build().Diff == nil && fr.RiskScore >= c.MinFileRisk {
+					if err := c.Renderer.File(ctx, fr); err != nil {
+						logger.Errorf("render error: %v", err)
 					}
-					if k, ok := key.(string); ok {
-						if fr, ok := value.(*malcontent.FileReport); ok {
-							if len(c.TrimPrefixes) > 0 {
-								k = report.TrimPrefixes(k, c.TrimPrefixes)
-							}
-							r.Files.Store(k, fr)
-							if c.Renderer != nil && r.Diff == nil && fr.RiskScore >= c.MinFileRisk {
-								if err := c.Renderer.File(ctx, fr); err != nil {
-									logger.Errorf("render error: %v", err)
-								}
-							}
-						}
-					}
-					return true
-				})
-			}
+				}
+				return true
+			})
 			return nil
 		}
 
@@ -377,7 +336,7 @@ func recursiveScan(ctx context.Context, c malcontent.Config) (*malcontent.Report
 				if len(c.TrimPrefixes) > 0 {
 					path = report.TrimPrefixes(path, c.TrimPrefixes)
 				}
-				r.Files.Store(path, &malcontent.FileReport{})
+				b.AddFile(path, &malcontent.FileReport{})
 				return fmt.Errorf("process: %w", err)
 			}
 			if fr == nil {
@@ -385,9 +344,9 @@ func recursiveScan(ctx context.Context, c malcontent.Config) (*malcontent.Report
 			}
 
 			if !c.OCI && (c.ExitFirstHit || c.ExitFirstMiss) {
-				var frMap sync.Map
-				frMap.Store(path, fr)
-				match, err := exitIfHitOrMiss(&frMap, path, c.ExitFirstHit, c.ExitFirstMiss)
+				b := malcontent.NewReportBuilder()
+				b.AddFile(path, fr)
+				match, err := exitIfHitOrMiss(b, path, c.ExitFirstHit, c.ExitFirstMiss)
 				if err != nil {
 					matchOnce.Do(func() {
 						matchChan <- matchResult{fr: match, err: err}
@@ -399,8 +358,8 @@ func recursiveScan(ctx context.Context, c malcontent.Config) (*malcontent.Report
 			if len(c.TrimPrefixes) > 0 {
 				path = report.TrimPrefixes(path, c.TrimPrefixes)
 			}
-			r.Files.Store(path, fr)
-			if c.Renderer != nil && r.Diff == nil && fr.RiskScore >= c.MinFileRisk {
+			b.AddFile(path, fr)
+			if c.Renderer != nil && b.Build().Diff == nil && fr.RiskScore >= c.MinFileRisk {
 				if err := c.Renderer.File(ctx, fr); err != nil {
 					return fmt.Errorf("render: %w", err)
 				}
@@ -450,24 +409,22 @@ func recursiveScan(ctx context.Context, c malcontent.Config) (*malcontent.Report
 
 			select {
 			case match := <-matchChan:
-				r := &malcontent.Report{
-					Files: sync.Map{},
-				}
+				b := malcontent.NewReportBuilder()
 				if match.fr != nil {
 					if len(c.TrimPrefixes) > 0 {
 						match.fr.Path = report.TrimPrefixes(match.fr.Path, c.TrimPrefixes)
 					}
-					r.Files.Store(match.fr.Path, match.fr)
+					b.AddFile(match.fr.Path, match.fr)
 				}
-				return r, match.err
+				return b.Build(), match.err
 			default:
-				return r, err
+				return b.Build(), err
 			}
 		}
 
 		// OCI images hadle their match his/miss logic per scanPath
 		if c.OCI {
-			match, err := exitIfHitOrMiss(&r.Files, imageURI, c.ExitFirstHit, c.ExitFirstMiss)
+			match, err := exitIfHitOrMiss(b, imageURI, c.ExitFirstHit, c.ExitFirstMiss)
 			if err != nil && c.Renderer != nil && match.RiskScore >= c.MinFileRisk {
 				if match != nil && c.Renderer != nil && match.RiskScore >= c.MinFileRisk {
 					if renderErr := c.Renderer.File(ctx, match); renderErr != nil {
@@ -475,7 +432,7 @@ func recursiveScan(ctx context.Context, c malcontent.Config) (*malcontent.Report
 					}
 				}
 				cancel()
-				return r, err
+				return b.Build(), err
 			}
 
 			if err := os.RemoveAll(ociExtractPath); err != nil {
@@ -484,15 +441,14 @@ func recursiveScan(ctx context.Context, c malcontent.Config) (*malcontent.Report
 		}
 		cancel()
 	} // loop: next scan path
-	return r, nil
+	return b.Build(), nil
 }
 
 // processArchive extracts and scans a single archive file.
-func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archivePath string, logger *clog.Logger) (*sync.Map, error) {
+func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archivePath string, logger *clog.Logger) (*malcontent.ReportBuilder, error) {
 	logger = logger.With("archivePath", archivePath)
 
-	var err error
-	var frs sync.Map
+	b := malcontent.NewReportBuilder()
 
 	tmpRoot, err := archive.ExtractArchiveToTempDir(ctx, archivePath)
 	if err != nil {
@@ -523,13 +479,12 @@ func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archi
 			return nil, err
 		}
 		if fr != nil {
-			// Store a clean reprepsentation of the archive's scanned file to match single file scanning behavior
 			clean := strings.TrimPrefix(extractedFilePath, tmpRoot)
-			frs.Store(clean, fr)
+			b.AddFile(clean, fr)
 		}
 	}
 
-	return &frs, nil
+	return b, nil
 }
 
 // processFile scans a single output file, rendering live output if available.
@@ -561,22 +516,20 @@ func Scan(ctx context.Context, c malcontent.Config) (*malcontent.Report, error) 
 	if err != nil {
 		return r, err
 	}
-	r.Files.Range(func(key, value any) bool {
-		if key == nil || value == nil {
-			return true
+
+	filteredFiles := make(map[string]*malcontent.FileReport)
+	for path, fr := range r.Files {
+		if path != "" && fr != nil && fr.RiskScore >= c.MinFileRisk {
+			filteredFiles[path] = fr
 		}
-		if fr, ok := value.(*malcontent.FileReport); ok {
-			if fr.RiskScore < c.MinFileRisk {
-				r.Files.Delete(key)
-			}
-		}
-		return true
-	})
+	}
+	r.Files = filteredFiles
+
 	if c.Stats {
 		err = render.Statistics(&c, r)
 		if err != nil {
 			return r, fmt.Errorf("stats: %w", err)
 		}
 	}
-	return r, nil
+	return r, err
 }

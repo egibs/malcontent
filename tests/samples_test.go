@@ -126,14 +126,11 @@ func TestJSON(t *testing.T) {
 				t.Errorf("json output mismatch: (-want +got):\n%s", diff)
 			}
 
-			res.Files.Range(func(_, value any) bool {
-				if r, ok := value.(*malcontent.FileReport); ok {
-					if strings.Contains(binPath, "/clean/") && r.RiskScore > 2 {
-						t.Errorf("%s score too high for a 'clean' sample: %s [%d]:\n%s", binPath, r.RiskLevel, r.RiskScore, got)
-					}
+			for _, fr := range res.Files {
+				if strings.Contains(binPath, "/clean/") && fr.RiskScore > 2 {
+					t.Errorf("%s score too high for a 'clean' sample: %s [%d]:\n%s", binPath, fr.RiskLevel, fr.RiskScore, got)
 				}
-				return true
-			})
+			}
 		})
 		return nil
 	})
@@ -205,15 +202,11 @@ func TestSimple(t *testing.T) {
 				t.Errorf("Simple output mismatch: (-want +got):\n%s", diff)
 			}
 
-			// Eeek. We shouldn't be returning such an awkward object in a public interface
-			res.Files.Range(func(_, value any) bool {
-				if r, ok := value.(*malcontent.FileReport); ok {
-					if strings.Contains(binPath, "/clean/") && r.RiskScore > 2 {
-						t.Errorf("%s score too high for a 'clean' sample: %s [%d]:\n%s", binPath, r.RiskLevel, r.RiskScore, got)
-					}
+			for _, fr := range res.Files {
+				if strings.Contains(binPath, "/clean/") && fr.RiskScore > 2 {
+					t.Errorf("%s score too high for a 'clean' sample: %s [%d]:\n%s", binPath, fr.RiskLevel, fr.RiskScore, got)
 				}
-				return true
-			})
+			}
 		})
 		return nil
 	})
@@ -521,14 +514,11 @@ func TestMarkdown(t *testing.T) {
 				t.Errorf("markdown output mismatch: (-want +got):\n%s", diff)
 			}
 
-			res.Files.Range(func(_, value any) bool {
-				if r, ok := value.(*malcontent.FileReport); ok {
-					if strings.Contains(binPath, "/clean/") && r.RiskScore > 2 {
-						t.Errorf("%s score too high for a 'clean' sample: %s [%d]:\n%s", binPath, r.RiskLevel, r.RiskScore, got)
-					}
+			for _, fr := range res.Files {
+				if strings.Contains(binPath, "/clean/") && fr.RiskScore > 2 {
+					t.Errorf("%s score too high for a 'clean' sample: %s [%d]:\n%s", binPath, fr.RiskLevel, fr.RiskScore, got)
 				}
-				return true
-			})
+			}
 		})
 		return nil
 	})
