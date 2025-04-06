@@ -43,7 +43,7 @@ func ExtractZstd(ctx context.Context, d string, f string) error {
 		return fmt.Errorf("failed to create directory for decomrpessed zstd file: %w", err)
 	}
 
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o400)
 	if err != nil {
 		return fmt.Errorf("failed to create decompressed zstd file: %w", err)
 	}

@@ -72,6 +72,10 @@ function update_dep() {
 		rel=$(git_clone https://github.com/ttc-cert/TTC-CERT-YARA-Rules.git "${tmpdir}")
 		cp -Rp ${tmpdir}/* "${kind}/"
 		;;
+	malpedia)
+	  rel=$(git_clone https://github.com/malpedia/signator-rules.git "${tmpdir}")
+		cp -Rp ${tmpdir}/README.md ${tmpdir}/rules/elf.*.yar* "${kind}/"
+		;;
 	*)
 		echo "unknown kind: ${kind}"
 		exit 2

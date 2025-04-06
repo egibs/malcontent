@@ -53,7 +53,7 @@ func ExtractBz2(ctx context.Context, d, f string) error {
 
 	// #nosec G115 // ignore Type conversion which leads to integer overflow
 	// header.Mode is int64 and FileMode is uint32
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o400)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}

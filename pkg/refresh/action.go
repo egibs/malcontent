@@ -50,7 +50,7 @@ func actionRefresh(ctx context.Context) ([]TestData, error) {
 			return nil, fmt.Errorf("create output directory: %w", err)
 		}
 
-		outFile, err := os.OpenFile(output, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		outFile, err := os.OpenFile(output, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o400)
 		if err != nil {
 			return nil, fmt.Errorf("create output file %s: %w", output, err)
 		}

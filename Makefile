@@ -76,7 +76,7 @@ golangci-lint-fix: $(GOLANGCI_LINT_BIN)
 
 LINTERS += yara-x-fmt
 yara-x-fmt: $(YARA_X_BIN)
-	find rules -type f -name "*.yara" -execdir "$(YARA_X_BIN)" fmt {} \;
+	find rules -type f -name "*.yar*" -execdir "$(YARA_X_BIN)" fmt {} \;
 
 yara-x-compile: $(YARA_X_BIN)
 	"$(YARA_X_BIN)" compile ./rules/

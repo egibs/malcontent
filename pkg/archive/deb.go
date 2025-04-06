@@ -46,7 +46,7 @@ func ExtractDeb(ctx context.Context, d, f string) error {
 			return fmt.Errorf("failed to read tar header: %w", err)
 		}
 
-		clean := filepath.Clean(header.Name)
+		clean := filepath.Clean(sanitizeFilename(header.Name))
 		if filepath.IsAbs(clean) || strings.Contains(clean, "../") {
 			return fmt.Errorf("path is absolute or contains a relative path traversal: %s", clean)
 		}

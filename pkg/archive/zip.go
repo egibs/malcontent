@@ -3,6 +3,8 @@ package archive
 import (
 	"archive/zip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/chainguard-dev/clog"
+	"github.com/chainguard-dev/malcontent/pkg/programkind"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -59,13 +62,37 @@ func extractFile(ctx context.Context, file *zip.File, destDir string, logger *cl
 	}
 	defer bufferPool.Put(buf)
 
-	clean := filepath.Clean(filepath.ToSlash(file.Name))
+	clean := filepath.Clean(filepath.ToSlash(sanitizeFilename(file.Name)))
 	if strings.Contains(clean, "..") {
 		logger.Warnf("skipping potentially unsafe file path: %s", file.Name)
 		return nil
 	}
 
-	target := filepath.Join(destDir, clean)
+	ext := programkind.GetExt(clean)
+	base := clean[:len(clean)-len(ext)]
+
+	var target string
+	if len(base) > 64 {
+		src, err := file.Open()
+		if err != nil {
+			return fmt.Errorf("failed to open archived file: %w", err)
+		}
+		defer src.Close()
+
+		hasher := sha256.New()
+		data, err := io.ReadAll(src)
+		if err != nil {
+			src.Close()
+			return err
+		}
+		hasher.Write(data)
+		hash := hex.EncodeToString(hasher.Sum(nil))
+
+		target = filepath.Join(destDir, hash+ext)
+	} else {
+		target = filepath.Join(destDir, clean)
+	}
+
 	if !IsValidPath(target, destDir) {
 		logger.Warnf("skipping file path outside extraction directory: %s", target)
 		return nil
@@ -91,7 +118,7 @@ func extractFile(ctx context.Context, file *zip.File, destDir string, logger *cl
 	}
 	defer src.Close()
 
-	dst, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	dst, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o400)
 	if err != nil {
 		return fmt.Errorf("failed to create destination file: %w", err)
 	}

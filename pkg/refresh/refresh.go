@@ -104,7 +104,7 @@ func prepareRefresh(ctx context.Context, rc Config) ([]TestData, error) {
 	}
 
 	for data, sample := range discovered {
-		outFile, err := os.OpenFile(data, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		outFile, err := os.OpenFile(data, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o400)
 		if err != nil {
 			return nil, fmt.Errorf("create output file %s: %w", data, err)
 		}

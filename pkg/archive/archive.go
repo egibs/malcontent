@@ -3,13 +3,16 @@ package archive
 import (
 	"archive/tar"
 	"context"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/malcontent/pkg/programkind"
@@ -243,7 +246,7 @@ func handleFile(target string, tr *tar.Reader) error {
 		return fmt.Errorf("failed to create parent directory: %w", err)
 	}
 
-	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	out, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o400)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
 	}
@@ -292,4 +295,24 @@ func handleSymlink(dir, linkName, target string) error {
 	}
 
 	return nil
+}
+
+// sanitizeFilename removes invalid characters from filenames
+// and replaces non-UTF8 characters with their hex representation
+func sanitizeFilename(name string) string {
+	invalid := []string{"\x00", "<", ">", ":", "\\", "//", "|", "?", "*"}
+
+	for _, c := range invalid {
+		name = strings.ReplaceAll(name, c, "_")
+	}
+
+	if !utf8.ValidString(name) {
+		cb := []byte(name)
+		hexName := hex.EncodeToString(cb)
+		name = hexName
+	}
+
+	reg := regexp.MustCompile(`[^\p{L}\p{N}\p{P}\p{S}\p{Z}]`)
+
+	return reg.ReplaceAllString(name, "_")
 }

@@ -205,7 +205,7 @@ func main() {
 			}
 
 			if outputFlag != "" {
-				outFile, err = os.OpenFile(outputFlag, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+				outFile, err = os.OpenFile(outputFlag, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o400)
 				if err != nil {
 					returnCode = ExitInputOutput
 					return err

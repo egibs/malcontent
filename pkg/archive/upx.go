@@ -50,7 +50,7 @@ func ExtractUPX(ctx context.Context, d, f string) error {
 		return err
 	}
 
-	err = os.WriteFile(target, tf, 0o600)
+	err = os.WriteFile(target, tf, 0o400)
 	if err != nil {
 		return err
 	}
