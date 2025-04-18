@@ -35,119 +35,134 @@ func IsValidPath(target, dir string) bool {
 }
 
 // ExtractArchiveToTempDir creates a temporary directory and extracts the archive file for scanning.
-func ExtractArchiveToTempDir(ctx context.Context, path string) (string, error) {
+func ExtractArchiveToTempDir(ctx context.Context, path string, out chan<- string, concurrent int) (string, error) {
 	logger := clog.FromContext(ctx).With("path", path)
-	logger.Debug("creating temp dir")
 
 	tmpDir, err := os.MkdirTemp("", filepath.Base(path))
 	if err != nil {
+		close(out)
 		return "", fmt.Errorf("failed to create temp dir: %w", err)
 	}
 
-	var extract func(context.Context, string, string) error
-	ft, err := programkind.GetCachedFileType(path)
+	ft, err := programkind.File(path)
 	if err != nil {
+		close(out)
 		return "", fmt.Errorf("failed to determine file type: %w", err)
 	}
 
-	switch {
-	case ft != nil && ft.MIME == "application/zlib":
+	extract := ExtractionMethod(programkind.GetExt(path))
+	if ft != nil && ft.MIME == "application/zlib" {
 		extract = ExtractZlib
-	case ft != nil && ft.MIME == "application/x-upx":
+	} else if ft != nil && ft.MIME == "application/x-upx" {
 		extract = ExtractUPX
-	default:
-		extract = ExtractionMethod(programkind.GetExt(path))
 	}
-
 	if extract == nil {
+		close(out)
 		return "", fmt.Errorf("unsupported archive type: %s", path)
 	}
 
-	err = extract(ctx, tmpDir, path)
-	if err != nil {
+	if err := extract(ctx, tmpDir, path); err != nil {
 		os.RemoveAll(tmpDir)
-		return "", fmt.Errorf("failed to extract %s: %w", path, err)
+		close(out)
+		return "", fmt.Errorf("extract error: %w", err)
 	}
 
-	var extractedFiles sync.Map
+	go func() {
+		defer close(out)
 
-	var processDir func(string) error
-	processDir = func(dir string) error {
-		files, err := os.ReadDir(dir)
-		if err != nil {
-			return fmt.Errorf("failed to read directory %s: %w", dir, err)
-		}
+		var extracted sync.Map
+		var wg sync.WaitGroup
 
-		for _, file := range files {
-			fullPath := filepath.Join(dir, file.Name())
+		sem := make(chan struct{}, concurrent)
 
-			if file.IsDir() {
-				if err := processDir(fullPath); err != nil {
-					logger.Warn("error processing subdirectory", "path", fullPath, "error", err)
-				}
-				continue
-			}
+		var processDir func(string)
+		processDir = func(dir string) {
+			defer wg.Done()
 
-			if _, processed := extractedFiles.Load(fullPath); processed {
-				continue
-			}
-
-			// Handle extracted UPX files separately; we keep the original around to show that UPX was used
-			if strings.HasSuffix(file.Name(), ".~") || strings.HasSuffix(file.Name(), ".000") {
-				extractedFiles.Store(fullPath, true)
-				continue
-			}
-
-			extractedFiles.Store(fullPath, true)
-
-			ft, err := programkind.GetCachedFileType(fullPath)
+			files, err := os.ReadDir(dir)
 			if err != nil {
-				logger.Warn("error determining file type", "path", fullPath, "error", err)
-				continue
+				logger.Warn("error reading directory", "path", dir, "error", err)
+				return
 			}
 
-			isArchive := false
-			var extract func(context.Context, string, string) error
+			for _, file := range files {
+				if ctx.Err() != nil {
+					return
+				}
 
-			switch {
-			case ft != nil && ft.MIME == "application/x-upx":
-				isArchive = true
-				extract = ExtractUPX
-			case ft != nil && ft.MIME == "application/zlib":
-				isArchive = true
-				extract = ExtractZlib
-			case programkind.ArchiveMap[programkind.GetExt(file.Name())]:
-				isArchive = true
-				extract = ExtractionMethod(programkind.GetExt(file.Name()))
-			}
+				fullPath := filepath.Join(dir, file.Name())
 
-			if isArchive && extract != nil {
-				if err := os.MkdirAll(dir, 0755); err != nil {
-					logger.Warn("failed to create extraction directory", "path", dir, "error", err)
+				if file.IsDir() {
+					wg.Add(1)
+					go processDir(fullPath)
 					continue
 				}
 
-				if err := extract(ctx, dir, fullPath); err != nil {
-					logger.Warn("failed to extract archive", "path", fullPath, "error", err)
-					os.RemoveAll(dir)
+				if strings.HasSuffix(file.Name(), ".~") || strings.HasSuffix(file.Name(), ".000") {
+					extracted.Store(fullPath, true)
 					continue
 				}
 
-				if err := os.Remove(fullPath); err != nil {
-					logger.Warn("failed to remove archive after extraction", "path", fullPath, "error", err)
+				if _, seen := extracted.LoadOrStore(fullPath, true); seen {
+					continue
 				}
 
-				if err := processDir(dir); err != nil {
-					logger.Warn("error processing extracted directory", "path", dir, "error", err)
+				select {
+				case out <- fullPath:
+				case <-ctx.Done():
+					return
 				}
+
+				sem <- struct{}{}
+				wg.Add(1)
+				go func(filePath, fileName string) {
+					defer wg.Done()
+					defer func() { <-sem }()
+
+					ft, err := programkind.File(filePath)
+					if err != nil {
+						logger.Warn("error determining file type", "path", filePath, "error", err)
+						return
+					}
+
+					isArchive := false
+					var subExtract func(context.Context, string, string) error
+
+					switch {
+					case ft != nil && ft.MIME == "application/x-upx":
+						isArchive = true
+						subExtract = ExtractUPX
+					case ft != nil && ft.MIME == "application/zlib":
+						isArchive = true
+						subExtract = ExtractZlib
+					default:
+						subExtract = ExtractionMethod(programkind.GetExt(fileName))
+						isArchive = subExtract != nil
+					}
+
+					if isArchive && subExtract != nil {
+						extractDir := filepath.Dir(filePath)
+						if err := subExtract(ctx, extractDir, filePath); err != nil {
+							logger.Warn("failed to extract nested archive", "path", filePath, "error", err)
+							return
+						}
+
+						if err := os.Remove(filePath); err != nil {
+							logger.Warn("failed to remove archive after extraction", "path", filePath, "error", err)
+						}
+
+						wg.Add(1)
+						go processDir(extractDir)
+					}
+				}(fullPath, file.Name())
 			}
 		}
-		return nil
-	}
 
-	if err := processDir(tmpDir); err != nil {
-		logger.Warn("error during recursive extraction", "error", err)
-	}
+		wg.Add(1)
+		processDir(tmpDir)
+		wg.Wait()
+	}()
+
 	return tmpDir, nil
 }
 

@@ -34,6 +34,19 @@ func interactive(c malcontent.Config) bool {
 	return c.Renderer != nil && c.Renderer.Name() == "Interactive"
 }
 
+var scannerPool sync.Pool
+
+func initScannerPool(rules *yarax.Rules, count int) {
+	scannerPool.New = func() any {
+		s := yarax.NewScanner(rules)
+		return s
+	}
+	for range count {
+		s := yarax.NewScanner(rules)
+		scannerPool.Put(s)
+	}
+}
+
 var (
 	// compiledRuleCache are a cache of previously compiled rules.
 	compiledRuleCache atomic.Pointer[yarax.Rules]
@@ -47,20 +60,9 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	logger := clog.FromContext(ctx)
 	logger = logger.With("path", path)
 
-	var yrs *yarax.Rules
-	var err error
-	if c.Rules == nil {
-		yrs, err = CachedRules(ctx, ruleFS)
-		if err != nil {
-			return nil, fmt.Errorf("rules: %w", err)
-		}
-	} else {
-		yrs = c.Rules
-	}
-
 	isArchive := archiveRoot != ""
 	mime := "<unknown>"
-	kind, err := programkind.GetCachedFileType(path)
+	kind, err := programkind.File(path)
 	if err != nil && !interactive(c) {
 		logger.Errorf("file type failure: %s: %s", path, err)
 	}
@@ -91,9 +93,18 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 		return nil, err
 	}
 
-	mrs, err := yrs.Scan(fc)
+	scanner, ok := scannerPool.Get().(*yarax.Scanner)
+	if !ok || scanner == nil {
+		yrs, err := CachedRules(ctx, ruleFS)
+		if err != nil {
+			return nil, fmt.Errorf("rules: %w", err)
+		}
+		scanner = yarax.NewScanner(yrs)
+	}
+	mrs, err := scanner.Scan(fc)
+	scannerPool.Put(scanner)
 	if err != nil {
-		logger.Debug("skipping", slog.Any("error", err))
+		logger.Debug("scan error", slog.Any("error", err))
 		return nil, err
 	}
 
@@ -517,37 +528,19 @@ func handleOCIResults(ctx context.Context, imageURI string, files *sync.Map, c m
 // processArchive extracts and scans a single archive file.
 func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archivePath string, logger *clog.Logger) (*sync.Map, error) {
 	logger = logger.With("archivePath", archivePath)
-
 	var frs sync.Map
 
-	tmpRoot, err := archive.ExtractArchiveToTempDir(ctx, archivePath)
+	pathCh := make(chan string, c.Concurrency)
+	tmpRoot, err := archive.ExtractArchiveToTempDir(ctx, archivePath, pathCh, c.Concurrency)
 	if err != nil {
-		return nil, fmt.Errorf("extract to temp: %w", err)
+		return nil, err
 	}
-	// Ensure that tmpRoot is removed before returning if created successfully
-	if tmpRoot != "" {
-		defer func() {
-			if err := os.RemoveAll(tmpRoot); err != nil {
-				logger.Errorf("remove %s: %v", tmpRoot, err)
-			}
-		}()
-	}
-	// macOS will prefix temporary directories with `/private`
-	// update tmpRoot with this prefix to allow strings.TrimPrefix to work
-	if runtime.GOOS == "darwin" {
-		tmpRoot = fmt.Sprintf("/private%s", tmpRoot)
-	}
-
-	extractedPaths, err := findFilesRecursively(ctx, tmpRoot)
-	if err != nil {
-		return nil, fmt.Errorf("find: %w", err)
-	}
+	defer os.RemoveAll(tmpRoot)
 
 	maxConcurrency := getMaxConcurrency(c.Concurrency)
 	g := setupErrorGroup(maxConcurrency)
 
-	ep := createPathChannel(extractedPaths)
-	for path := range ep {
+	for path := range pathCh {
 		g.Go(func() error {
 			fr, err := processFile(ctx, c, rfs, path, archivePath, tmpRoot, logger)
 			if err != nil {
@@ -609,6 +602,11 @@ func processFile(ctx context.Context, c malcontent.Config, ruleFS []fs.FS, path 
 
 // Scan YARA scans a data source, applying output filters if necessary.
 func Scan(ctx context.Context, c malcontent.Config) (*malcontent.Report, error) {
+	yrs, err := CachedRules(ctx, c.RuleFS)
+	if err != nil {
+		return nil, err
+	}
+	initScannerPool(yrs, c.Concurrency*2)
 	r, err := recursiveScan(ctx, c)
 	if err != nil && !interactive(c) {
 		return r, err

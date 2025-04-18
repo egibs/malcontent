@@ -1,5 +1,50 @@
 {
     "Files": {
+        "/apko_0.13.2_linux_arm64.tar.gz": {
+            "Path": "testdata/apko_nested.tar.gz ∴ /apko_0.13.2_linux_arm64.tar.gz",
+            "SHA256": "f547dac9102247d2cf0995054bc6b496e2bf48380e3650af5e7f0874a3de4499",
+            "Size": 13797947,
+            "Pledge": [
+                "rpath"
+            ],
+            "Behaviors": [
+                {
+                    "Description": "references and possibly executes relative path",
+                    "MatchStrings": [
+                        "./jv"
+                    ],
+                    "RiskScore": 2,
+                    "RiskLevel": "MEDIUM",
+                    "RuleURL": "https://github.com/chainguard-dev/malcontent/blob/main/rules/fs/path/relative.yara#relative_path_val",
+                    "ID": "fs/path/relative",
+                    "RuleName": "relative_path_val"
+                },
+                {
+                    "Description": "Supports SSH (secure shell)",
+                    "MatchStrings": [
+                        "SSH"
+                    ],
+                    "RiskScore": 2,
+                    "RiskLevel": "MEDIUM",
+                    "RuleURL": "https://github.com/chainguard-dev/malcontent/blob/main/rules/net/tcp/ssh.yara#ssh",
+                    "ID": "net/tcp/ssh",
+                    "RuleName": "ssh"
+                },
+                {
+                    "Description": "changes working directory",
+                    "MatchStrings": [
+                        "cd u"
+                    ],
+                    "RiskScore": 1,
+                    "RiskLevel": "LOW",
+                    "RuleURL": "https://github.com/chainguard-dev/malcontent/blob/main/rules/process/chdir.yara#chdir_shell",
+                    "ID": "process/chdir",
+                    "RuleName": "chdir_shell"
+                }
+            ],
+            "RiskScore": 2,
+            "RiskLevel": "MEDIUM"
+        },
         "/apko_0.13.2_linux_arm64/apko": {
             "Path": "testdata/apko_nested.tar.gz ∴ /apko_0.13.2_linux_arm64/apko",
             "SHA256": "ad237dc65d25cfe673b4891e189e9ff1fd041ec817133ac6c565120a6a189189",
