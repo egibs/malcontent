@@ -2,6 +2,7 @@ package pool
 
 import (
 	"math"
+	"runtime"
 	"sync"
 
 	yarax "github.com/VirusTotal/yara-x/go"
@@ -29,7 +30,8 @@ func NewBufferPool(count int) *BufferPool {
 
 	for range count {
 		buffer := make([]byte, defaultBuffer)
-		bp.pool.Put(&buffer)
+		//nolint:staticcheck // SA6002: Direct slice storage prevents memory leak from pointer indirection
+		bp.pool.Put(buffer)
 	}
 
 	return bp
@@ -48,9 +50,9 @@ func (bp *BufferPool) Get(size int64) []byte {
 		return make([]byte, size)
 	}
 
-	bufPtr := &buf
-	if cap(*bufPtr) < int(size) {
-		bp.pool.Put(bufPtr)
+	if cap(buf) < int(size) {
+		//nolint:staticcheck // SA6002: Direct slice storage prevents memory leak from pointer indirection
+		bp.pool.Put(buf)
 		return make([]byte, size)
 	}
 
@@ -64,10 +66,25 @@ func (bp *BufferPool) Put(buf []byte) {
 	}
 
 	clear(buf)
-	bufPtr := &buf
-	if cap(*bufPtr) <= maxBuffer {
-		bp.pool.Put(bufPtr)
+
+	// Check memory pressure before returning large buffers to pool
+	if cap(buf) <= maxBuffer {
+		// Under memory pressure, don't pool large buffers
+		if cap(buf) > defaultBuffer*4 && isMemoryPressure() {
+			return
+		}
+		//nolint:staticcheck // SA6002: Direct slice storage prevents memory leak from pointer indirection
+		bp.pool.Put(buf)
 	}
+}
+
+// isMemoryPressure checks if system is under memory pressure.
+func isMemoryPressure() bool {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	heapUsage := float64(m.HeapInuse) / float64(m.Sys)
+	return heapUsage > 0.85
 }
 
 // ScannerPool provides a pool of yara-x scanners.

@@ -13,42 +13,9 @@ var (
 	matchPool      *pool.BufferPool
 )
 
-// StringPool holds data to handle string interning.
-type StringPool struct {
-	sync.RWMutex
-	strings map[string]string
-}
-
-// NewStringPool creates a new string pool.
-func NewStringPool(length int) *StringPool {
-	return &StringPool{
-		strings: make(map[string]string, length),
-	}
-}
-
-// Intern returns an interned version of the input string.
-func (sp *StringPool) Intern(s string) string {
-	sp.RLock()
-	if interned, ok := sp.strings[s]; ok {
-		sp.RUnlock()
-		return interned
-	}
-	sp.RUnlock()
-
-	sp.Lock()
-	defer sp.Unlock()
-
-	if interned, ok := sp.strings[s]; ok {
-		return interned
-	}
-
-	sp.strings[s] = s
-	return s
-}
 
 type matchProcessor struct {
 	fc       []byte
-	pool     *StringPool
 	matches  []yarax.Match
 	patterns []yarax.Pattern
 	mu       sync.Mutex
@@ -57,7 +24,6 @@ type matchProcessor struct {
 func newMatchProcessor(fc []byte, matches []yarax.Match, mp []yarax.Pattern) *matchProcessor {
 	return &matchProcessor{
 		fc:       fc,
-		pool:     NewStringPool(len(matches)),
 		matches:  matches,
 		patterns: mp,
 	}
@@ -76,6 +42,10 @@ func (mp *matchProcessor) process() []string {
 	if len(mp.matches) == 0 {
 		return nil
 	}
+
+	defer func() {
+		mp.fc = nil
+	}()
 
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
@@ -115,9 +85,13 @@ func (mp *matchProcessor) process() []string {
 			if l <= cap(buffer) {
 				buffer = buffer[:l]
 				copy(buffer, matchBytes)
-				*result = append(*result, mp.pool.Intern(string(buffer)))
+				// Create string from buffer copy to avoid referencing original fc
+				*result = append(*result, string(buffer))
 			} else {
-				*result = append(*result, mp.pool.Intern(string(matchBytes)))
+				// Force copy to avoid string sharing backing array with fc
+				matchCopy := make([]byte, l)
+				copy(matchCopy, matchBytes)
+				*result = append(*result, string(matchCopy))
 			}
 		} else {
 			if patterns == nil || cap(patterns) < patternsCap {

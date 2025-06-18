@@ -478,6 +478,9 @@ func Generate(ctx context.Context, path string, mrs *yarax.ScanResults, c malcon
 			}
 
 			processor := newMatchProcessor(fc, matches, m.Patterns())
+			defer func() {
+				processor = nil
+			}()
 			matchedStrings = processor.process()
 		}
 

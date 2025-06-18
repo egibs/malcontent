@@ -31,6 +31,7 @@ import (
 	yarax "github.com/VirusTotal/yara-x/go"
 )
 
+
 func interactive(c malcontent.Config) bool {
 	return c.Renderer != nil && c.Renderer.Name() == "Interactive"
 }
@@ -121,24 +122,10 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	}
 	defer f.Close()
 
-	fc := filePool.Get(size)
-	defer filePool.Put(fc)
-
-	var bytesRead int
-	var totalRead int64
-	for totalRead < size {
-		bytesRead, err = f.Read(fc[totalRead:])
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-		totalRead += int64(bytesRead)
-	}
-
-	if totalRead < size && err != nil {
-		return nil, fmt.Errorf("incomplete read: got %d bytes, expected %d: %w", totalRead, size, err)
+	// Use fastest possible file reading - let Go's optimized io.ReadAll handle it
+	fc, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
 	mrs, err := scanner.Scan(fc)
