@@ -77,6 +77,10 @@ func (mp *matchProcessor) process() []string {
 		return nil
 	}
 
+	defer func() {
+		mp.fc = nil
+	}()
+
 	mp.mu.Lock()
 	defer mp.mu.Unlock()
 

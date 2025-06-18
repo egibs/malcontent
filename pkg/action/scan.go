@@ -355,16 +355,21 @@ func handleScanPath(ctx context.Context, scanPath string, c malcontent.Config, r
 		defer cleanupOCIPath(scanInfo.ociExtractPath, logger)
 	}
 
-	paths, err := findFilesRecursively(ctx, scanInfo.effectivePath)
+	// Use streaming scan instead of building a slice
+	err = processPaths(ctx, scanInfo.effectivePath, c, r, matchChan, matchOnce, logger)
 	if err != nil {
 		if len(c.ScanPaths) == 1 {
-			return fmt.Errorf("find: %w", err)
+			return fmt.Errorf("scan: %w", err)
 		}
-		logger.Errorf("find failed: %v", err)
+		logger.Errorf("scan failed: %v", err)
 		return nil
 	}
 
-	return processPaths(ctx, paths, scanInfo, c, r, matchChan, matchOnce, logger)
+	if c.OCI && ctx.Err() == nil {
+		return handleOCIResults(ctx, scanInfo.imageURI, &r.Files, c, logger)
+	}
+
+	return nil
 }
 
 func prepareScanPath(ctx context.Context, scanPath string, isOCI bool, logger *clog.Logger) (scanPathInfo, error) {
@@ -394,7 +399,7 @@ func prepareScanPath(ctx context.Context, scanPath string, isOCI bool, logger *c
 	return info, nil
 }
 
-func processPaths(ctx context.Context, paths []string, scanInfo scanPathInfo, c malcontent.Config, r *malcontent.Report, matchChan chan matchResult, matchOnce *sync.Once, logger *clog.Logger) error {
+func processPaths(ctx context.Context, rootPath string, c malcontent.Config, r *malcontent.Report, matchChan chan matchResult, matchOnce *sync.Once, logger *clog.Logger) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -404,51 +409,86 @@ func processPaths(ctx context.Context, paths []string, scanInfo scanPathInfo, c 
 	scanCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	go func() {
-		<-ctx.Done()
-		logger.Debug("parent context canceled, stopping scan")
-		cancel()
-	}()
-
 	g, gCtx := errgroup.WithContext(scanCtx)
 	g.SetLimit(maxConcurrency)
 
-	setupMatchHandler(gCtx, matchChan, c, cancel, logger)
+	// Use a semaphore to control the number of goroutines
+	sem := make(chan struct{}, maxConcurrency)
 
-	pc := make(chan string, len(paths))
-	go func() {
-		defer close(pc)
-		for _, path := range paths {
-			select {
-			case <-gCtx.Done():
-				return
-			case pc <- path:
+	err := filepath.WalkDir(rootPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsPermission(err) {
+				logger.Debugf("permission denied: %s", path)
+				return nil
 			}
+			return err
 		}
-	}()
 
-	for path := range pc {
-		g.Go(func() error {
-			if gCtx.Err() != nil {
-				return scanCtx.Err()
+		if d.IsDir() || strings.Contains(path, "/.git/") {
+			return nil
+		}
+
+		if d.Type()&fs.ModeSymlink == fs.ModeSymlink {
+			logger.Debugf("attempting to resolve symlink: %s", path)
+			eval, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				logger.Debugf("eval: %s: %s", path, err)
+				return nil
 			}
-			return processPath(gCtx, path, scanInfo, c, r, matchChan, matchOnce, logger)
+			fi, err := os.Stat(eval)
+			if err != nil {
+				logger.Debugf("stat: %s: %s", path, err)
+				return nil
+			}
+			if fi.IsDir() {
+				logger.Debugf("ignoring symlinked directory: %s", path)
+				return nil
+			}
+			path = eval
+		}
+
+		select {
+		case <-gCtx.Done():
+			return gCtx.Err()
+		default:
+		}
+
+		select {
+		case sem <- struct{}{}:
+		case <-gCtx.Done():
+			return gCtx.Err()
+		}
+
+		g.Go(func() error {
+			defer func() { <-sem }()
+
+			if gCtx.Err() != nil {
+				return gCtx.Err()
+			}
+
+			if programkind.IsSupportedArchive(path) {
+				return handleArchiveFile(gCtx, path, c, r, matchChan, matchOnce, logger)
+			}
+
+			scanInfo := scanPathInfo{
+				originalPath:  rootPath,
+				effectivePath: rootPath,
+			}
+
+			return handleSingleFile(gCtx, path, scanInfo, c, r, matchChan, matchOnce, logger)
 		})
-	}
 
-	err := g.Wait()
-
-	if scanCtx.Err() != nil && errors.Is(scanCtx.Err(), context.Canceled) {
-		logger.Debug("scan operation was canceled")
-		return scanCtx.Err()
-	}
+		return nil
+	})
 
 	if err != nil {
-		return handleScanError(matchChan, r, c, err)
+		cancel()
+		return err
 	}
 
-	if c.OCI && ctx.Err() == nil {
-		return handleOCIResults(ctx, scanInfo.imageURI, &r.Files, c, logger)
+	// Wait for all goroutines to complete
+	if waitErr := g.Wait(); waitErr != nil {
+		return waitErr
 	}
 
 	return nil
@@ -630,42 +670,21 @@ func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archi
 
 	tmpRoot, err := archive.ExtractArchiveToTempDir(ctx, archivePath)
 	if err != nil {
-		// Avoid failing an entire scan when encountering problematic archives
-		// e.g., joblib_0.8.4_compressed_pickle_py27_np17.gz: not a valid gzip archive
 		if !c.ExitExtraction {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("extract to temp: %w", err)
 	}
-	// Ensure that tmpRoot is removed before returning if created successfully
+
 	defer func() {
 		if err := os.RemoveAll(tmpRoot); err != nil {
 			logger.Errorf("remove %s: %v", tmpRoot, err)
 		}
 	}()
 
-	// macOS will prefix temporary directories with `/private`
-	// update tmpRoot (if populated) with this prefix to allow strings.TrimPrefix to work
 	if runtime.GOOS == "darwin" && tmpRoot != "" {
 		tmpRoot = fmt.Sprintf("/private%s", tmpRoot)
 	}
-
-	extractedPaths, err := findFilesRecursively(ctx, tmpRoot)
-	if err != nil {
-		return nil, fmt.Errorf("find: %w", err)
-	}
-
-	ep := make(chan string, len(extractedPaths))
-	go func() {
-		defer close(ep)
-		for _, path := range extractedPaths {
-			select {
-			case <-ctx.Done():
-				return
-			case ep <- path:
-			}
-		}
-	}()
 
 	maxConcurrency := getMaxConcurrency(c.Concurrency)
 	scanCtx, cancel := context.WithCancel(ctx)
@@ -674,8 +693,55 @@ func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archi
 	g, gCtx := errgroup.WithContext(scanCtx)
 	g.SetLimit(maxConcurrency)
 
-	for path := range ep {
+	sem := make(chan struct{}, maxConcurrency)
+
+	err = filepath.WalkDir(tmpRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if os.IsPermission(err) {
+				logger.Debugf("permission denied: %s", path)
+				return nil
+			}
+			return err
+		}
+
+		if d.IsDir() || strings.Contains(path, "/.git/") {
+			return nil
+		}
+
+		if d.Type()&fs.ModeSymlink == fs.ModeSymlink {
+			logger.Debugf("attempting to resolve symlink: %s", path)
+			eval, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				logger.Debugf("eval: %s: %s", path, err)
+				return nil
+			}
+			fi, err := os.Stat(eval)
+			if err != nil {
+				logger.Debugf("stat: %s: %s", path, err)
+				return nil
+			}
+			if fi.IsDir() {
+				logger.Debugf("ignoring symlinked directory: %s", path)
+				return nil
+			}
+			path = eval
+		}
+
+		select {
+		case <-gCtx.Done():
+			return gCtx.Err()
+		default:
+		}
+
+		select {
+		case sem <- struct{}{}:
+		case <-gCtx.Done():
+			return gCtx.Err()
+		}
+
 		g.Go(func() error {
+			defer func() { <-sem }()
+
 			fr, err := processFile(gCtx, c, rfs, path, archivePath, tmpRoot, logger)
 			if err != nil {
 				return err
@@ -686,10 +752,17 @@ func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archi
 			}
 			return nil
 		})
+
+		return nil
+	})
+
+	if err != nil {
+		cancel()
+		return nil, err
 	}
 
-	if err := g.Wait(); err != nil {
-		return nil, err
+	if waitErr := g.Wait(); waitErr != nil {
+		return nil, waitErr
 	}
 
 	return &frs, nil
