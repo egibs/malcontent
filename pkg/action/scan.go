@@ -71,7 +71,8 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	}
 
 	logger := clog.FromContext(ctx)
-	logger = logger.With("path", path)
+	// Skip logger.With to avoid mutex contention
+	// logger = logger.With("path", path)
 
 	isArchive := archiveRoot != ""
 
@@ -89,17 +90,15 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 		return fr, nil
 	}
 
-	mime := "<unknown>"
 	kind, err := programkind.File(path)
 	if err != nil && !interactive(c) {
-		logger.Errorf("file type failure: %s: %s", path, err)
-	}
-	if kind != nil {
-		mime = kind.MIME
+		// Skip error logging to avoid mutex contention
+		// logger.Errorf("file type failure: %s: %s", path, err)
+		_ = err // Suppress unused variable warning
 	}
 
 	if !c.IncludeDataFiles && kind == nil {
-		logger.Debugf("skipping %s [%s]: data file or empty", path, mime)
+		// Skip debug logging to avoid mutex contention with thousands of goroutines
 		fr := &malcontent.FileReport{Skipped: "data file or empty", Path: path}
 		// Immediately remove skipped files within archives
 		if isArchive {
@@ -107,7 +106,8 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 		}
 		return fr, nil
 	}
-	logger = logger.With("mime", mime)
+	// Skip logger.With to avoid mutex contention
+	// logger = logger.With("mime", mime)
 
 	// Always use cached rules to ensure consistent rule sharing across all scanners
 	var yrs *yarax.Rules
@@ -161,7 +161,7 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	// Scan with YARA-X (requires full file content)
 	mrs, err := scanner.Scan(fileContent)
 	if err != nil {
-		logger.Debug("skipping", slog.Any("error", err))
+		// Skip debug logging to avoid mutex contention
 		return nil, err
 	}
 
