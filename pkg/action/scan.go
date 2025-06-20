@@ -47,6 +47,9 @@ var (
 	scannerPool    *pool.ScannerPool
 	// processedArchiveCount tracks archives processed for periodic GC
 	processedArchiveCount atomic.Int64
+	// globalArchiveSemaphore limits total archive processing goroutines across all archives
+	globalArchiveSemaphore chan struct{}
+	archiveSemaphoreOnce   sync.Once
 )
 
 const (
@@ -60,6 +63,15 @@ func triggerPeriodicGC() {
 	if count%gcTriggerInterval == 0 {
 		runtime.GC()
 	}
+}
+
+// initGlobalArchiveSemaphore initializes the global archive semaphore once
+func initGlobalArchiveSemaphore() {
+	archiveSemaphoreOnce.Do(func() {
+		// Limit total archive processing goroutines to 2x CPU count
+		maxArchiveWorkers := runtime.NumCPU() * 2
+		globalArchiveSemaphore = make(chan struct{}, maxArchiveWorkers)
+	})
 }
 
 // scanSinglePath YARA scans a single path and converts it to a fileReport.
@@ -589,7 +601,6 @@ func handleSingleFile(ctx context.Context, path string, scanInfo scanPathInfo, c
 		return nil
 	}
 
-
 	if !c.OCI && (c.ExitFirstHit || c.ExitFirstMiss) {
 		var frMap sync.Map
 		frMap.Store(path, fr)
@@ -693,6 +704,9 @@ func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archi
 		}
 	}()
 
+	// Initialize global archive semaphore
+	initGlobalArchiveSemaphore()
+
 	maxConcurrency := getMaxConcurrency(c.Concurrency)
 	scanCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -702,6 +716,14 @@ func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archi
 
 	for path := range ep {
 		g.Go(func() error {
+			// Acquire global archive worker slot to prevent goroutine explosion across all archives
+			select {
+			case globalArchiveSemaphore <- struct{}{}:
+				defer func() { <-globalArchiveSemaphore }()
+			case <-gCtx.Done():
+				return gCtx.Err()
+			}
+
 			fr, err := processFile(gCtx, c, rfs, path, archivePath, tmpRoot, logger)
 			if err != nil {
 				return err
