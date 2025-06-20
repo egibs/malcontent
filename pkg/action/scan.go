@@ -50,11 +50,15 @@ var (
 	// globalArchiveSemaphore limits total archive processing goroutines across all archives
 	globalArchiveSemaphore chan struct{}
 	archiveSemaphoreOnce   sync.Once
+	// processedFileCount tracks files processed for scanner recreation
+	processedFileCount atomic.Int64
 )
 
 const (
 	// gcTriggerInterval determines how often to run GC (every N archives)
 	gcTriggerInterval = 50
+	// scannerRefreshInterval determines how often to create fresh scanners (every N files)
+	scannerRefreshInterval = 200
 )
 
 // triggerPeriodicGC increments the archive counter and triggers GC if needed
@@ -68,10 +72,30 @@ func triggerPeriodicGC() {
 // initGlobalArchiveSemaphore initializes the global archive semaphore once
 func initGlobalArchiveSemaphore() {
 	archiveSemaphoreOnce.Do(func() {
-		// Limit total archive processing goroutines to 2x CPU count
-		maxArchiveWorkers := runtime.NumCPU() * 2
+		// Use very conservative limit to prevent goroutine explosion
+		maxArchiveWorkers := 64 // Hard limit regardless of CPU count
 		globalArchiveSemaphore = make(chan struct{}, maxArchiveWorkers)
 	})
+}
+
+// getScannerWithRefresh gets a scanner from pool or creates fresh one periodically to prevent C-side accumulation
+func getScannerWithRefresh(yrs *yarax.Rules) *yarax.Scanner {
+	fileCount := processedFileCount.Add(1)
+
+	// Every scannerRefreshInterval files, create a fresh scanner to break C-side accumulation
+	if fileCount%scannerRefreshInterval == 0 {
+		// Force fresh scanner creation to break potential YARA-X memory accumulation
+		return yarax.NewScanner(yrs)
+	}
+
+	// Try to get from pool first
+	scanner := scannerPool.Get()
+	if scanner != nil {
+		return scanner
+	}
+
+	// Fallback to fresh scanner if pool is empty
+	return yarax.NewScanner(yrs)
 }
 
 // scanSinglePath YARA scans a single path and converts it to a fileReport.
@@ -146,16 +170,10 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 		scannerPool = pool.NewScannerPool(cachedRules, cpuCount)
 	})
 
-	scanner := scannerPool.Get()
-	if scanner == nil {
-		// Use the same cached rules that the pool was initialized with
-		cachedRules, err := CachedRules(ctx, ruleFS)
-		if err != nil {
-			return nil, fmt.Errorf("rules for new scanner: %w", err)
-		}
-		scanner = yarax.NewScanner(cachedRules)
-	}
-	defer scannerPool.Put(scanner)
+	// Create fresh scanner for each scan to prevent C-side state accumulation
+	// No pool - fresh scanner per file with explicit C-side cleanup
+	scanner := yarax.NewScanner(yrs)
+	defer scanner.Destroy()
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -707,12 +725,13 @@ func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archi
 	// Initialize global archive semaphore
 	initGlobalArchiveSemaphore()
 
-	maxConcurrency := getMaxConcurrency(c.Concurrency)
+	// Use much lower concurrency for archive processing to prevent goroutine explosion
+	archiveConcurrency := 32 // Conservative limit regardless of system concurrency
 	scanCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	g, gCtx := errgroup.WithContext(scanCtx)
-	g.SetLimit(maxConcurrency)
+	g.SetLimit(archiveConcurrency)
 
 	for path := range ep {
 		g.Go(func() error {
