@@ -45,7 +45,22 @@ var (
 	initializeOnce sync.Once
 	filePool       *pool.BufferPool
 	scannerPool    *pool.ScannerPool
+	// processedArchiveCount tracks archives processed for periodic GC
+	processedArchiveCount atomic.Int64
 )
+
+const (
+	// gcTriggerInterval determines how often to run GC (every N archives)
+	gcTriggerInterval = 50
+)
+
+// triggerPeriodicGC increments the archive counter and triggers GC if needed
+func triggerPeriodicGC() {
+	count := processedArchiveCount.Add(1)
+	if count%gcTriggerInterval == 0 {
+		runtime.GC()
+	}
+}
 
 // scanSinglePath YARA scans a single path and converts it to a fileReport.
 //
@@ -542,6 +557,9 @@ func handleArchiveFile(ctx context.Context, path string, c malcontent.Config, r 
 		return err
 	}
 
+	// Trigger periodic garbage collection after processing archive (archives contain many files)
+	triggerPeriodicGC()
+
 	if !c.OCI && (c.ExitFirstHit || c.ExitFirstMiss) {
 		match, err := exitIfHitOrMiss(frs, path, c.ExitFirstHit, c.ExitFirstMiss)
 		if err != nil {
@@ -598,6 +616,7 @@ func handleSingleFile(ctx context.Context, path string, scanInfo scanPathInfo, c
 	if fr == nil {
 		return nil
 	}
+
 
 	if !c.OCI && (c.ExitFirstHit || c.ExitFirstMiss) {
 		var frMap sync.Map
