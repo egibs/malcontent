@@ -167,13 +167,12 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 		// Set pool sizes to CPU count for optimal scanning performance
 		cpuCount := runtime.NumCPU()
 		filePool = pool.NewBufferPool(cpuCount)
-		scannerPool = pool.NewScannerPool(cachedRules, cpuCount)
+		scannerPool = pool.NewScannerPool(cachedRules, 16) // Limit to 16 scanners
 	})
 
-	// Create fresh scanner for each scan to prevent C-side state accumulation
-	// No pool - fresh scanner per file with explicit C-side cleanup
-	scanner := yarax.NewScanner(yrs)
-	defer scanner.Destroy()
+	// Get scanner from pool limited to 16 scanners
+	scanner := scannerPool.Get()
+	defer scannerPool.Put(scanner)
 
 	f, err := os.Open(path)
 	if err != nil {
@@ -722,11 +721,8 @@ func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archi
 		}
 	}()
 
-	// Initialize global archive semaphore
-	initGlobalArchiveSemaphore()
-
-	// Use much lower concurrency for archive processing to prevent goroutine explosion
-	archiveConcurrency := 32 // Conservative limit regardless of system concurrency
+	// Use reasonable concurrency - fresh scanners + explicit cleanup should handle memory well
+	archiveConcurrency := runtime.NumCPU() * 4 // Allow more than CPU count but prevent explosion
 	scanCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -735,14 +731,7 @@ func processArchive(ctx context.Context, c malcontent.Config, rfs []fs.FS, archi
 
 	for path := range ep {
 		g.Go(func() error {
-			// Acquire global archive worker slot to prevent goroutine explosion across all archives
-			select {
-			case globalArchiveSemaphore <- struct{}{}:
-				defer func() { <-globalArchiveSemaphore }()
-			case <-gCtx.Done():
-				return gCtx.Err()
-			}
-
+			// No global semaphore - fresh scanners with explicit cleanup should handle memory properly
 			fr, err := processFile(gCtx, c, rfs, path, archivePath, tmpRoot, logger)
 			if err != nil {
 				return err
