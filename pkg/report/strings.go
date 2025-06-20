@@ -46,6 +46,14 @@ func (sp *StringPool) Intern(s string) string {
 	return s
 }
 
+// clear removes all strings from the pool to free memory
+func (sp *StringPool) clear() {
+	sp.Lock()
+	defer sp.Unlock()
+	// Clear the map to release all string references
+	clear(sp.strings)
+}
+
 type matchProcessor struct {
 	fc       []byte
 	pool     *StringPool
@@ -115,14 +123,20 @@ func (mp *matchProcessor) process() []string {
 			if l <= cap(buffer) {
 				buffer = buffer[:l]
 				copy(buffer, matchBytes)
-				*result = append(*result, mp.pool.Intern(string(buffer)))
+				// Create a copy of the string to avoid retaining reference to original file content
+				matchStr := string(buffer)
+				*result = append(*result, mp.pool.Intern(string([]byte(matchStr))))
 			} else {
-				*result = append(*result, mp.pool.Intern(string(matchBytes)))
+				// Create a copy of the string to avoid retaining reference to original file content
+				matchStr := string(matchBytes)
+				*result = append(*result, mp.pool.Intern(string([]byte(matchStr))))
 			}
 		} else {
 			if patterns == nil || cap(patterns) < patternsCap {
 				patterns = make([]string, 0, patternsCap)
 			} else {
+				// Clear backing array to prevent GC retention
+				clear(patterns)
 				patterns = patterns[:0]
 			}
 			for _, p := range mp.patterns {
@@ -136,6 +150,13 @@ func (mp *matchProcessor) process() []string {
 	copy(finalResult, *result)
 
 	return finalResult
+}
+
+// clearFileContent releases the file content to free memory after processing
+func (mp *matchProcessor) clearFileContent() {
+	mp.fc = nil
+	// Also clear the string pool to prevent memory retention
+	mp.pool.clear()
 }
 
 // containsUnprintable determines if a byte is a valid character.

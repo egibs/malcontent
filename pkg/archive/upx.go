@@ -3,6 +3,7 @@ package archive
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,15 +43,29 @@ func ExtractUPX(ctx context.Context, d, f string) error {
 		return fmt.Errorf("invalid file path: %s", target)
 	}
 
-	tf, err := os.ReadFile(f)
+	// Create target file for streaming copy instead of loading entire file into memory
+	targetFile, err := os.Create(target)
 	if err != nil {
-		return fmt.Errorf("failed to read file: %w", err)
+		return fmt.Errorf("failed to create target file: %w", err)
+	}
+	defer targetFile.Close()
+
+	// Set file permissions
+	if err := targetFile.Chmod(0o600); err != nil {
+		os.Remove(target)
+		return fmt.Errorf("failed to set file permissions: %w", err)
 	}
 
-	err = os.WriteFile(target, tf, 0o600)
+	// Stream copy the file content instead of loading it all into memory
+	_, err = io.Copy(targetFile, gf)
 	if err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
+		os.Remove(target)
+		return fmt.Errorf("failed to copy file content: %w", err)
 	}
+
+	// Limit concurrent UPX processes to prevent process explosion
+	programkind.AcquireUPXSemaphore()
+	defer programkind.ReleaseUPXSemaphore()
 
 	cmd := exec.Command("upx", "-d", "-k", target)
 	output, err := cmd.CombinedOutput()

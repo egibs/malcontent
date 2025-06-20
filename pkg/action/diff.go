@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/agext/levenshtein"
 	"github.com/chainguard-dev/clog"
@@ -28,6 +29,46 @@ type ScanResult struct {
 	err      error
 	tmpRoot  string
 	imageURI string
+}
+
+// fileCollector implements Renderer to collect files during scanning for diff processing.
+type fileCollector struct {
+	files map[string]*malcontent.FileReport
+	mutex sync.Mutex
+}
+
+func newFileCollector() *fileCollector {
+	return &fileCollector{
+		files: make(map[string]*malcontent.FileReport),
+	}
+}
+
+func (fc *fileCollector) Name() string { return "FileCollector" }
+
+func (fc *fileCollector) Scanning(_ context.Context, _ string) {}
+
+func (fc *fileCollector) File(_ context.Context, fr *malcontent.FileReport) error {
+	if fr.Skipped != "" {
+		return nil
+	}
+	fc.mutex.Lock()
+	defer fc.mutex.Unlock()
+	fc.files[fr.Path] = fr
+	return nil
+}
+
+func (fc *fileCollector) Full(_ context.Context, _ *malcontent.Config, _ *malcontent.Report) error {
+	return nil
+}
+
+func (fc *fileCollector) getFiles() map[string]*malcontent.FileReport {
+	fc.mutex.Lock()
+	defer fc.mutex.Unlock()
+	result := make(map[string]*malcontent.FileReport)
+	for k, v := range fc.files {
+		result[k] = v
+	}
+	return result
 }
 
 // displayPath mimics diff(1) output for relative paths.
@@ -125,43 +166,34 @@ func relFileReport(ctx context.Context, c malcontent.Config, fromPath string, is
 		return nil, "", ctx.Err()
 	}
 
+	// Use file collector to gather files during scan instead of sync.Map
+	collector := newFileCollector()
 	fromConfig := c
-	fromConfig.Renderer = nil
+	fromConfig.Renderer = collector
 	fromConfig.ScanPaths = []string{fromPath}
-	fromReport, err := recursiveScan(ctx, fromConfig)
+	_, err := recursiveScan(ctx, fromConfig)
 	if err != nil {
 		return nil, "", err
 	}
 
+	// Get collected files and process them for relative paths
+	collectedFiles := collector.getFiles()
 	fromRelPath := map[string]*malcontent.FileReport{}
 	var base string
-	var rangeErr error
 
-	fromReport.Files.Range(func(key, value any) bool {
-		if key == nil || value == nil {
-			return true
+	for _, fr := range collectedFiles {
+		isArchive := fr.ArchiveRoot != ""
+		if fr.Skipped != "" {
+			continue
 		}
 
-		if fr, ok := value.(*malcontent.FileReport); ok {
-			isArchive := fr.ArchiveRoot != ""
-			if fr.Skipped != "" {
-				return true
-			}
-
-			rel, b, err := relPath(fromPath, fr, isArchive, isImage)
-			if err != nil {
-				rangeErr = err
-				return false
-			}
-
-			fromRelPath[rel] = fr
-			base = b
+		rel, b, err := relPath(fromPath, fr, isArchive, isImage)
+		if err != nil {
+			return nil, "", err
 		}
-		return true
-	})
 
-	if rangeErr != nil {
-		return nil, "", rangeErr
+		fromRelPath[rel] = fr
+		base = b
 	}
 
 	return fromRelPath, base, nil

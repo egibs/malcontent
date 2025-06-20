@@ -20,6 +20,20 @@ import (
 	"github.com/gabriel-vasile/mimetype"
 )
 
+// Limit concurrent external processes to prevent process explosion
+var upxSemaphore = make(chan struct{}, max(1, runtime.NumCPU()/4)) // Limit to 25% of CPUs
+
+// AcquireUPXSemaphore acquires the UPX process semaphore to limit concurrent UPX processes.
+func AcquireUPXSemaphore() error {
+	upxSemaphore <- struct{}{} // Block until semaphore is available
+	return nil
+}
+
+// ReleaseUPXSemaphore releases the UPX process semaphore.
+func ReleaseUPXSemaphore() {
+	<-upxSemaphore
+}
+
 // Supported archive extensions.
 var ArchiveMap = map[string]bool{
 	".apk":    true,
@@ -180,6 +194,10 @@ func IsValidUPX(header []byte, path string) (bool, error) {
 	if err := UPXInstalled(); err != nil {
 		return false, err
 	}
+
+	// Limit concurrent UPX processes
+	upxSemaphore <- struct{}{}
+	defer func() { <-upxSemaphore }()
 
 	cmd := exec.Command("upx", "-l", "-f", path)
 	output, err := cmd.CombinedOutput()

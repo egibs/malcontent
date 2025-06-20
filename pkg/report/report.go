@@ -479,6 +479,8 @@ func Generate(ctx context.Context, path string, mrs *yarax.ScanResults, c malcon
 
 			processor := newMatchProcessor(fc, matches, m.Patterns())
 			matchedStrings = processor.process()
+			// Clear file content reference immediately after processing to free memory
+			processor.clearFileContent()
 		}
 
 		b := &malcontent.Behavior{

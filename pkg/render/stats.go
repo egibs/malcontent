@@ -116,9 +116,92 @@ func PkgStatistics(_ *malcontent.Config, files *sync.Map) ([]malcontent.StrMetri
 	return stats, width, numBehaviors
 }
 
+// buildRiskStatsFromAggregate creates risk statistics from aggregate data
+func buildRiskStatsFromAggregate(c *malcontent.Config, stats *malcontent.AggregateStats) []malcontent.IntMetric {
+	var result []malcontent.IntMetric
+	totalFiles := int(stats.FilesScanned - stats.SkippedFiles)
+
+	// Convert risk level strings to numeric scores for sorting
+	riskLevelMap := map[string]int{
+		"NONE": 0, "LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4,
+	}
+
+	for levelStr, count := range stats.RiskDistribution {
+		if count == 0 {
+			continue
+		}
+
+		riskLevel, ok := riskLevelMap[levelStr]
+		if !ok {
+			continue
+		}
+
+		// Skip low risk files in scan mode like the original logic
+		if c.Scan && riskLevel < 3 {
+			continue
+		}
+
+		percentage := float64(count) / float64(totalFiles) * 100
+		result = append(result, malcontent.IntMetric{
+			Key:   riskLevel,
+			Value: percentage,
+			Count: int(count),
+			Total: totalFiles,
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Value > result[j].Value
+	})
+
+	return result
+}
+
+// buildPkgStatsFromAggregate creates package statistics from aggregate data
+func buildPkgStatsFromAggregate(stats *malcontent.AggregateStats) ([]malcontent.StrMetric, int) {
+	var result []malcontent.StrMetric
+	totalBehaviors := int(stats.TotalBehaviors)
+
+	if totalBehaviors == 0 {
+		return result, 10
+	}
+
+	width := 10
+	for namespace, count := range stats.BehaviorCounts {
+		if count == 0 {
+			continue
+		}
+
+		percentage := float64(count) / float64(totalBehaviors) * 100
+		result = append(result, malcontent.StrMetric{
+			Key:   namespace,
+			Value: percentage,
+			Count: int(count),
+			Total: totalBehaviors,
+		})
+
+		if len(namespace) > width {
+			width = len(namespace)
+		}
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Value > result[j].Value
+	})
+
+	return result, width
+}
+
 func Statistics(c *malcontent.Config, r *malcontent.Report) error {
-	riskStats, totalRisks, processedFiles, skippedFiles := RiskStatistics(c, &r.Files)
-	pkgStats, width, totalBehaviors := PkgStatistics(c, &r.Files)
+	// Use aggregate stats instead of legacy sync.Map
+	stats := r.Stats.GetStats()
+	riskStats := buildRiskStatsFromAggregate(c, &stats)
+	pkgStats, width := buildPkgStatsFromAggregate(&stats)
+
+	totalRisks := int(stats.FilesWithRisk)
+	processedFiles := int(stats.FilesScanned)
+	skippedFiles := int(stats.SkippedFiles)
+	totalBehaviors := int(stats.TotalBehaviors)
 
 	statsSymbol := "📊"
 	riskSymbol := "⚠️ "

@@ -23,7 +23,8 @@ func NewBufferPool(count int) *BufferPool {
 
 	bp.pool = sync.Pool{
 		New: func() any {
-			return make([]byte, defaultBuffer)
+			buffer := make([]byte, defaultBuffer)
+			return &buffer
 		},
 	}
 
@@ -43,18 +44,17 @@ func (bp *BufferPool) Get(size int64) []byte {
 
 	bufInterface := bp.pool.Get()
 
-	buf, ok := bufInterface.([]byte)
-	if !ok || buf == nil {
+	bufPtr, ok := bufInterface.(*[]byte)
+	if !ok || bufPtr == nil {
 		return make([]byte, size)
 	}
 
-	bufPtr := &buf
 	if cap(*bufPtr) < int(size) {
 		bp.pool.Put(bufPtr)
 		return make([]byte, size)
 	}
 
-	return buf[:size]
+	return (*bufPtr)[:size]
 }
 
 // Put returns a byte buffer to the pool for future reuse.
@@ -101,5 +101,16 @@ func (sp *ScannerPool) Get() *yarax.Scanner {
 
 // Put returns a scanner to the scanner pool.
 func (sp *ScannerPool) Put(scanner *yarax.Scanner) {
-	sp.pool.Put(scanner)
+	if scanner != nil {
+		// Try to clear profiling data if supported (no-op if not built with profiling feature)
+		// This prevents memory accumulation in scanners over time
+		func() {
+			defer func() {
+				// Ignore panic if profiling not supported - it's optional
+				recover()
+			}()
+			scanner.ClearProfilingData()
+		}()
+		sp.pool.Put(scanner)
+	}
 }

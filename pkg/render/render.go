@@ -39,9 +39,11 @@ func New(kind string, w io.Writer) (malcontent.Renderer, error) {
 	case "markdown":
 		return NewMarkdown(w), nil
 	case "yaml":
-		return NewYAML(w), nil
+		yaml := NewYAML(w)
+		return &yaml, nil
 	case "json":
-		return NewJSON(w), nil
+		json := NewJSON(w)
+		return &json, nil
 	case "simple":
 		return NewSimple(w), nil
 	case "strings":
@@ -69,9 +71,54 @@ func riskEmoji(score int) string {
 	return symbol
 }
 
-func serializedStats(c *malcontent.Config, r *malcontent.Report) *Stats {
-	pkgStats, _, totalBehaviors := PkgStatistics(c, &r.Files)
-	riskStats, totalRisks, processedFiles, skippedFiles := RiskStatistics(c, &r.Files)
+func serializedStats(_ *malcontent.Config, r *malcontent.Report) *Stats {
+	// Use aggregate statistics instead of sync.Map for memory efficiency
+	stats := r.Stats.GetStats()
+
+	// Convert aggregate statistics to the old format for compatibility
+	var riskStats []malcontent.IntMetric
+	var totalRisks int
+
+	for riskLevel, count := range stats.RiskDistribution {
+		if count > 0 {
+			percentage := (float64(count) / float64(stats.FilesScanned)) * 100
+			// Convert risk level string back to int for compatibility
+			var riskInt int
+			switch riskLevel {
+			case "NONE":
+				riskInt = 0
+			case "LOW":
+				riskInt = 1
+			case "MEDIUM", "MED":
+				riskInt = 2
+			case "HIGH":
+				riskInt = 3
+			case "CRITICAL", "CRIT":
+				riskInt = 4
+			}
+			riskStats = append(riskStats, malcontent.IntMetric{
+				Key:   riskInt,
+				Value: percentage,
+				Count: int(count),
+				Total: int(stats.FilesScanned),
+			})
+			totalRisks += int(count)
+		}
+	}
+
+	// Convert behavior statistics
+	var pkgStats []malcontent.StrMetric
+	for behaviorID, count := range stats.BehaviorCounts {
+		if count > 0 && stats.TotalBehaviors > 0 {
+			percentage := (float64(count) / float64(stats.TotalBehaviors)) * 100
+			pkgStats = append(pkgStats, malcontent.StrMetric{
+				Key:   behaviorID,
+				Value: percentage,
+				Count: int(count),
+				Total: int(stats.TotalBehaviors),
+			})
+		}
+	}
 
 	sort.Slice(pkgStats, func(i, j int) bool {
 		return pkgStats[i].Key < pkgStats[j].Key
@@ -83,10 +130,10 @@ func serializedStats(c *malcontent.Config, r *malcontent.Report) *Stats {
 
 	return &Stats{
 		PkgStats:       pkgStats,
-		ProcessedFiles: processedFiles,
+		ProcessedFiles: int(stats.FilesScanned),
 		RiskStats:      riskStats,
-		SkippedFiles:   skippedFiles,
-		TotalBehaviors: totalBehaviors,
+		SkippedFiles:   int(stats.SkippedFiles),
+		TotalBehaviors: int(stats.TotalBehaviors),
 		TotalRisks:     totalRisks,
 	}
 }
