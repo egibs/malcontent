@@ -151,39 +151,11 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	}
 	defer f.Close()
 
-	// Read entire file content using fixed-size buffer chunks
+	// Read entire file content efficiently
 	// YARA-X requires full file content as []byte slice - no streaming support
-	var fileContent []byte
-	if size > 0 {
-		fileContent = make([]byte, size)
-	}
-
-	readBuf := filePool.Get(4096) // Use small fixed buffer for reading
-	defer filePool.Put(readBuf)
-
-	var totalRead int64
-	for totalRead < size {
-		remainingBytes := size - totalRead
-		chunkSize := int64(len(readBuf))
-		if remainingBytes < chunkSize {
-			chunkSize = remainingBytes
-		}
-
-		bytesRead, err := f.Read(readBuf[:chunkSize])
-		if bytesRead > 0 {
-			copy(fileContent[totalRead:], readBuf[:bytesRead])
-			totalRead += int64(bytesRead)
-		}
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	if totalRead < size && err != nil {
-		return nil, fmt.Errorf("incomplete read: got %d bytes, expected %d: %w", totalRead, size, err)
+	fileContent, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("read file: %w", err)
 	}
 
 	// Scan with YARA-X (requires full file content)
