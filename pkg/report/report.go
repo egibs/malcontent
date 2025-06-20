@@ -111,7 +111,11 @@ func thirdPartyKey(path string, rule string) string {
 	words := []string{subDir}
 
 	// ELASTIC_Linux_Trojan_Gafgyt_E4A1982B
-	words = append(words, strings.Split(strings.ToLower(rule), "_")...)
+	splitWords := strings.Split(strings.ToLower(rule), "_")
+	// Copy to prevent holding onto the backing array
+	for _, word := range splitWords {
+		words = append(words, word)
+	}
 
 	// strip off the last word if it's a hex key
 	lastWord := words[len(words)-1]
@@ -559,7 +563,10 @@ func Generate(ctx context.Context, path string, mrs *yarax.ScanResults, c malcon
 				pledges = append(pledges, v)
 			case "syscall":
 				sy := strings.Split(v, ",")
-				syscalls = append(syscalls, sy...)
+				// Copy to prevent holding onto the backing array
+				for _, s := range sy {
+					syscalls = append(syscalls, s)
+				}
 			case "cap":
 				caps = append(caps, v)
 			}

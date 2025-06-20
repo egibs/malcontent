@@ -123,12 +123,17 @@ func (mp *matchProcessor) process() []string {
 			if patterns == nil || cap(patterns) < patternsCap {
 				patterns = make([]string, 0, patternsCap)
 			} else {
+				clear(patterns)
 				patterns = patterns[:0]
 			}
 			for _, p := range mp.patterns {
 				patterns = append(patterns, p.Identifier())
 			}
-			*result = append(*result, slices.Compact(patterns)...)
+			compacted := slices.Compact(patterns)
+			// Copy to prevent holding onto the backing array
+			for _, pattern := range compacted {
+				*result = append(*result, pattern)
+			}
 		}
 	}
 

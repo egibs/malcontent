@@ -23,7 +23,8 @@ func NewBufferPool(count int) *BufferPool {
 
 	bp.pool = sync.Pool{
 		New: func() any {
-			return make([]byte, defaultBuffer)
+			buffer := make([]byte, defaultBuffer)
+			return &buffer
 		},
 	}
 
@@ -43,18 +44,17 @@ func (bp *BufferPool) Get(size int64) []byte {
 
 	bufInterface := bp.pool.Get()
 
-	buf, ok := bufInterface.([]byte)
-	if !ok || buf == nil {
+	bufPtr, ok := bufInterface.(*[]byte)
+	if !ok || bufPtr == nil {
 		return make([]byte, size)
 	}
 
-	bufPtr := &buf
 	if cap(*bufPtr) < int(size) {
 		bp.pool.Put(bufPtr)
 		return make([]byte, size)
 	}
 
-	return buf[:size]
+	return (*bufPtr)[:size]
 }
 
 // Put returns a byte buffer to the pool for future reuse.
@@ -64,9 +64,8 @@ func (bp *BufferPool) Put(buf []byte) {
 	}
 
 	clear(buf)
-	bufPtr := &buf
-	if cap(*bufPtr) <= maxBuffer {
-		bp.pool.Put(bufPtr)
+	if cap(buf) <= maxBuffer {
+		bp.pool.Put(&buf)
 	}
 }
 

@@ -94,6 +94,7 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	}
 	logger = logger.With("mime", mime)
 
+	// Always use cached rules to ensure consistent rule sharing across all scanners
 	var yrs *yarax.Rules
 	if c.Rules == nil {
 		yrs, err = CachedRules(ctx, ruleFS)
@@ -104,14 +105,28 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 		yrs = c.Rules
 	}
 
+	// Initialize pools once with cached rules - all scanners will share the same rule set
 	initializeOnce.Do(func() {
-		filePool = pool.NewBufferPool(c.Concurrency + 1)
-		scannerPool = pool.NewScannerPool(yrs, c.Concurrency+1)
+		// Get cached rules for pool initialization to ensure consistency
+		cachedRules, err := CachedRules(ctx, ruleFS)
+		if err != nil {
+			// Fall back to provided rules if caching fails
+			cachedRules = yrs
+		}
+		// Set pool sizes to CPU count for optimal scanning performance
+		cpuCount := runtime.NumCPU()
+		filePool = pool.NewBufferPool(cpuCount)
+		scannerPool = pool.NewScannerPool(cachedRules, cpuCount)
 	})
 
 	scanner := scannerPool.Get()
 	if scanner == nil {
-		scanner = yarax.NewScanner(yrs)
+		// Use the same cached rules that the pool was initialized with
+		cachedRules, err := CachedRules(ctx, ruleFS)
+		if err != nil {
+			return nil, fmt.Errorf("rules for new scanner: %w", err)
+		}
+		scanner = yarax.NewScanner(cachedRules)
 	}
 	defer scannerPool.Put(scanner)
 
@@ -121,27 +136,43 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	}
 	defer f.Close()
 
-	fc := filePool.Get(size)
-	defer filePool.Put(fc)
+	// Read entire file content using fixed-size buffer chunks
+	// YARA-X requires full file content as []byte slice - no streaming support
+	var fileContent []byte
+	if size > 0 {
+		fileContent = make([]byte, size)
+	}
 
-	var bytesRead int
+	readBuf := filePool.Get(4096) // Use small fixed buffer for reading
+	defer filePool.Put(readBuf)
+
 	var totalRead int64
 	for totalRead < size {
-		bytesRead, err = f.Read(fc[totalRead:])
+		remainingBytes := size - totalRead
+		chunkSize := int64(len(readBuf))
+		if remainingBytes < chunkSize {
+			chunkSize = remainingBytes
+		}
+
+		bytesRead, err := f.Read(readBuf[:chunkSize])
+		if bytesRead > 0 {
+			copy(fileContent[totalRead:], readBuf[:bytesRead])
+			totalRead += int64(bytesRead)
+		}
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
 			return nil, err
 		}
-		totalRead += int64(bytesRead)
 	}
 
 	if totalRead < size && err != nil {
 		return nil, fmt.Errorf("incomplete read: got %d bytes, expected %d: %w", totalRead, size, err)
 	}
 
-	mrs, err := scanner.Scan(fc)
+	// Scan with YARA-X (requires full file content)
+	mrs, err := scanner.Scan(fileContent)
 	if err != nil {
 		logger.Debug("skipping", slog.Any("error", err))
 		return nil, err
@@ -159,7 +190,11 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 		return fr, nil
 	}
 
-	fr, err := report.Generate(ctx, path, mrs, c, archiveRoot, logger, fc, kind)
+	fr, err := report.Generate(ctx, path, mrs, c, archiveRoot, logger, fileContent, kind)
+	// Clear fileContent immediately after report generation to free memory
+	fileContent = nil
+	// Clear match results to ensure no references are held to large data
+	mrs = nil
 	if err != nil {
 		return nil, NewFileReportError(err, path, TypeGenerateError)
 	}
