@@ -7,6 +7,7 @@ import (
 	"context"
 	"io"
 	"io/fs"
+	"maps"
 	"sync"
 
 	yarax "github.com/VirusTotal/yara-x/go"
@@ -116,10 +117,114 @@ type DiffReport struct {
 	Modified *orderedmap.OrderedMap[string, *FileReport] `json:",omitempty" yaml:",omitempty"`
 }
 
+// AggregateStats stores aggregate statistics instead of individual file reports.
+type AggregateStats struct {
+	FilesScanned     int64            // Total files processed
+	FilesWithRisk    int64            // Files with risk > 0
+	TotalBehaviors   int64            // Total behavior count across all files
+	RiskDistribution map[string]int64 // Count of files by risk level
+	BehaviorCounts   map[string]int64 // Count of behaviors by ID
+	BytesScanned     int64            // Total bytes processed
+	SkippedFiles     int64            // Files skipped (too large, data files, etc.)
+	mutex            sync.RWMutex     // Protect concurrent access
+}
+
+// NewAggregateStats creates a new AggregateStats with initialized maps.
+func NewAggregateStats() *AggregateStats {
+	return &AggregateStats{
+		RiskDistribution: make(map[string]int64),
+		BehaviorCounts:   make(map[string]int64),
+	}
+}
+
+// AddFileReport processes a file report and updates aggregate statistics.
+func (as *AggregateStats) AddFileReport(fr *FileReport) {
+	as.mutex.Lock()
+	defer as.mutex.Unlock()
+
+	as.FilesScanned++
+	as.BytesScanned += fr.Size
+
+	if fr.Skipped != "" {
+		as.SkippedFiles++
+		return
+	}
+
+	if fr.RiskScore > 0 {
+		as.FilesWithRisk++
+		as.RiskDistribution[fr.RiskLevel]++
+	}
+
+	as.TotalBehaviors += int64(len(fr.Behaviors))
+	for _, behavior := range fr.Behaviors {
+		as.BehaviorCounts[behavior.ID]++
+	}
+}
+
+// GetStats returns a copy of the statistics for safe read access.
+func (as *AggregateStats) GetStats() AggregateStats {
+	as.mutex.RLock()
+	defer as.mutex.RUnlock()
+
+	// Deep copy maps
+	riskDist := make(map[string]int64)
+	maps.Copy(riskDist, as.RiskDistribution)
+
+	behaviorCounts := make(map[string]int64)
+	maps.Copy(behaviorCounts, as.BehaviorCounts)
+
+	return AggregateStats{
+		FilesScanned:     as.FilesScanned,
+		FilesWithRisk:    as.FilesWithRisk,
+		TotalBehaviors:   as.TotalBehaviors,
+		RiskDistribution: riskDist,
+		BehaviorCounts:   behaviorCounts,
+		BytesScanned:     as.BytesScanned,
+		SkippedFiles:     as.SkippedFiles,
+	}
+}
+
 type Report struct {
-	Files  sync.Map
+	Stats  *AggregateStats
 	Diff   *DiffReport
 	Filter string
+	Files  sync.Map `json:"-"`
+}
+
+// GetFiles returns all file reports as a regular map for easier API access.
+func (r *Report) GetFiles() map[string]*FileReport {
+	files := make(map[string]*FileReport)
+	r.Files.Range(func(key, value any) bool {
+		if path, ok := key.(string); ok {
+			if fr, ok := value.(*FileReport); ok {
+				files[path] = fr
+			}
+		}
+		return true
+	})
+	return files
+}
+
+// GetFilesCount returns the number of files scanned.
+func (r *Report) GetFilesCount() int {
+	return int(r.Stats.FilesScanned)
+}
+
+// GetFilesWithRiskCount returns the number of files with risk findings.
+func (r *Report) GetFilesWithRiskCount() int {
+	return int(r.Stats.FilesWithRisk)
+}
+
+// GetRiskDistribution returns risk level distribution as a regular map.
+func (r *Report) GetRiskDistribution() map[string]int64 {
+	stats := r.Stats.GetStats()
+	return stats.RiskDistribution
+}
+
+// GetBehaviorCounts returns behavior counts as a regular map.
+func (r *Report) GetBehaviorCounts() map[string]int64 {
+	stats := r.Stats.GetStats()
+	return stats.BehaviorCounts
 }
 
 type IntMetric struct {

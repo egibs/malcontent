@@ -17,7 +17,6 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -579,14 +578,7 @@ func main() {
 						return fmt.Errorf("scan: %w", err)
 					}
 
-					length := func(m *sync.Map) int {
-						length := 0
-						m.Range(func(_, _ any) bool {
-							length++
-							return true
-						})
-						return length
-					}(&res.Files)
+					length := int(res.Stats.FilesWithRisk)
 
 					err = renderer.Full(ctx, &mc, res)
 					if err != nil {
