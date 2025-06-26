@@ -26,10 +26,8 @@ type JSON struct {
 }
 
 func NewJSON(w io.Writer) JSON {
-	// Auto-enable streaming with temporary directory for memory safety
 	tempDir, err := os.MkdirTemp("", "malcontent-json-*")
 	if err != nil {
-		// Fallback to in-memory mode if temp directory creation fails
 		tempDir = ""
 	}
 

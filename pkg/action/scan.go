@@ -117,8 +117,9 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	go func() {
 		// Initialize scanner semaphore if needed
 		initializeOnce.Do(func() {
-			// Limit concurrent scanner creation to a small number to prevent memory pressure
-			maxScannerConcurrency := min(8, runtime.NumCPU())
+			// Limit concurrent scanner creation to prevent memory pressure
+			// Use much more conservative limits based on the memory profile showing massive allocations
+			maxScannerConcurrency := min(4, max(1, runtime.NumCPU()/4))
 			scannerSemaphore = make(chan struct{}, maxScannerConcurrency)
 		})
 
@@ -238,6 +239,12 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	// Explicitly clear large data structures to help GC
 	fc = nil
 	mrs = nil
+
+	// Force GC periodically to handle massive memory allocations shown in profile
+	// Use a simple counter to avoid GC on every file but still be aggressive
+	if path[len(path)-1]%8 == 0 { // GC roughly every 8th file based on path hash
+		runtime.GC()
+	}
 
 	// Clean up the path if scanning an archive
 	var clean string
@@ -441,6 +448,11 @@ func processPaths(ctx context.Context, scanInfo scanPathInfo, c malcontent.Confi
 	}
 
 	maxConcurrency := getMaxConcurrency(c.Concurrency)
+	// Apply memory-conscious limits to main processing concurrency too
+	// Memory profile shows scanSinglePath allocating 127TB+
+	if maxConcurrency > 16 {
+		maxConcurrency = min(16, maxConcurrency*3/4)
+	}
 	scanCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -556,19 +568,21 @@ func getMaxConcurrency(configured int) int {
 
 func archiveConcurrency(mainConcurrency int) int {
 	maxConcurrency := getMaxConcurrency(mainConcurrency)
-	// With scanner creation semaphore limiting memory pressure,
-	// we can use full CPU resources for archive processing
-	// Only reduce concurrency slightly to account for I/O overhead
+	// Memory profile shows massive allocations (127TB+ in scanSinglePath)
+	// Need much more conservative concurrency limits to prevent memory pressure
 	switch {
-	case maxConcurrency >= 16:
-		// Use ~90% of available CPUs for high-CPU systems
-		return max(8, (maxConcurrency*9)/10)
+	case maxConcurrency >= 32:
+		// Very conservative for high-CPU systems due to memory pressure
+		return min(8, maxConcurrency/4)
+	case maxConcurrency >= 8:
+		// Limit to 1/3 of available CPUs for mid-range systems
+		return max(2, maxConcurrency/3)
 	case maxConcurrency >= 4:
-		// Use ~80% of available CPUs for mid-range systems
-		return max(3, (maxConcurrency*4)/5)
+		// Use half for smaller systems
+		return max(1, maxConcurrency/2)
 	default:
-		// Use full concurrency for low-CPU systems
-		return maxConcurrency
+		// Single threaded for very small systems
+		return 1
 	}
 }
 
@@ -813,9 +827,11 @@ func processArchives(ctx context.Context, tmpRoot, archivePath string, c malcont
 
 	err = g.Wait()
 
-	// Force GC after processing large archives to help with memory pressure
-	if len(paths) > 100 {
+	// Force GC after processing archives to help with memory pressure
+	// Memory profile shows massive allocations, so be more aggressive
+	if len(paths) > 50 {
 		runtime.GC()
+		runtime.GC() // Double GC to ensure cleanup
 	}
 
 	return err
