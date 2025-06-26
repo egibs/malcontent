@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,6 +42,8 @@ var (
 	ErrMatchedCondition = errors.New("matched exit criteria")
 	// initializeOnce ensures that the file and scanner pools are only initialized once.
 	initializeOnce sync.Once
+	// scannerSemaphore limits concurrent scanner creation to prevent memory pressure
+	scannerSemaphore chan struct{}
 )
 
 const maxMmapSize = 1 << 31 // 2048MB
@@ -86,6 +87,9 @@ func scanFD(scanner *yarax.Scanner, fd uintptr, logger *clog.Logger) ([]byte, *y
 		return nil, nil, err
 	}
 
+	// Create a copy of the data to return since the mmap will be unmapped
+	// This is necessary because report generation needs access to file content
+	// for checksum calculation and match string extraction
 	fc := make([]byte, len(data))
 	copy(fc, data)
 
@@ -103,6 +107,7 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 
 	isArchive := archiveRoot != ""
 
+	// Start scanner creation concurrently with file operations
 	type scannerResult struct {
 		scanner *yarax.Scanner
 		err     error
@@ -110,6 +115,17 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	scannerChan := make(chan scannerResult, 1)
 
 	go func() {
+		// Initialize scanner semaphore if needed
+		initializeOnce.Do(func() {
+			// Limit concurrent scanner creation to a small number to prevent memory pressure
+			maxScannerConcurrency := min(8, runtime.NumCPU())
+			scannerSemaphore = make(chan struct{}, maxScannerConcurrency)
+		})
+
+		// Acquire semaphore before creating scanner
+		scannerSemaphore <- struct{}{}
+		defer func() { <-scannerSemaphore }()
+
 		var yrs *yarax.Rules
 		var err error
 		if c.Rules == nil {
@@ -125,8 +141,10 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 		scannerChan <- scannerResult{scanner: scanner}
 	}()
 
+	// Do file I/O and metadata detection while scanner is being created
 	f, err := os.Open(path)
 	if err != nil {
+		// Cleanup the scanner goroutine
 		go func() {
 			if result := <-scannerChan; result.scanner != nil {
 				result.scanner.Destroy()
@@ -139,6 +157,7 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 
 	fi, err := f.Stat()
 	if err != nil {
+		// Cleanup the scanner goroutine
 		go func() {
 			if result := <-scannerChan; result.scanner != nil {
 				result.scanner.Destroy()
@@ -149,6 +168,7 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 
 	size := fi.Size()
 	if size == 0 {
+		// Cleanup the scanner goroutine
 		go func() {
 			if result := <-scannerChan; result.scanner != nil {
 				result.scanner.Destroy()
@@ -170,12 +190,14 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	}
 
 	if !c.IncludeDataFiles && kind == nil {
+		// Cleanup the scanner goroutine
 		go func() {
 			if result := <-scannerChan; result.scanner != nil {
 				result.scanner.Destroy()
 			}
 		}()
 		logger.Debugf("skipping %s [%s]: data file or empty", path, mime)
+		// Immediately remove skipped files within archives
 		if isArchive {
 			defer os.RemoveAll(path)
 		}
@@ -183,6 +205,7 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 	}
 	logger = logger.With("mime", mime)
 
+	// Wait for scanner to be ready
 	scannerRes := <-scannerChan
 	if scannerRes.err != nil {
 		return nil, scannerRes.err
@@ -212,9 +235,9 @@ func scanSinglePath(ctx context.Context, c malcontent.Config, path string, ruleF
 		return nil, NewFileReportError(err, path, TypeGenerateError)
 	}
 
-	defer func() {
-		mrs = nil //nolint:ineffassign // clear rule matches after report generation
-	}()
+	// Explicitly clear large data structures to help GC
+	fc = nil
+	mrs = nil
 
 	// Clean up the path if scanning an archive
 	var clean string
@@ -533,15 +556,19 @@ func getMaxConcurrency(configured int) int {
 
 func archiveConcurrency(mainConcurrency int) int {
 	maxConcurrency := getMaxConcurrency(mainConcurrency)
+	// With scanner creation semaphore limiting memory pressure,
+	// we can use full CPU resources for archive processing
+	// Only reduce concurrency slightly to account for I/O overhead
 	switch {
-	case maxConcurrency >= 32:
-		return max(16, (maxConcurrency*3)/4)
-	case maxConcurrency <= 8:
-		return max(1, maxConcurrency/2)
+	case maxConcurrency >= 16:
+		// Use ~90% of available CPUs for high-CPU systems
+		return max(8, (maxConcurrency*9)/10)
+	case maxConcurrency >= 4:
+		// Use ~80% of available CPUs for mid-range systems
+		return max(3, (maxConcurrency*4)/5)
 	default:
-		baseConcurrency := int(math.Sqrt(float64(mainConcurrency)))
-		log := max(int(math.Log2(float64(mainConcurrency))-3), 0)
-		return max(2, baseConcurrency+log)
+		// Use full concurrency for low-CPU systems
+		return maxConcurrency
 	}
 }
 
@@ -784,7 +811,14 @@ func processArchives(ctx context.Context, tmpRoot, archivePath string, c malcont
 		})
 	}
 
-	return g.Wait()
+	err = g.Wait()
+
+	// Force GC after processing large archives to help with memory pressure
+	if len(paths) > 100 {
+		runtime.GC()
+	}
+
+	return err
 }
 
 // handleFileReportError returns the appropriate FileReport and error depending on the type of error.
