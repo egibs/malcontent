@@ -13,7 +13,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/agext/levenshtein"
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/malcontent/pkg/archive"
 	"github.com/chainguard-dev/malcontent/pkg/malcontent"
@@ -453,88 +452,89 @@ func behaviorExists(b *malcontent.Behavior, behaviors []*malcontent.Behavior) bo
 }
 
 // combineReports performs one-to-one matching between removed and added files.
-// all Levenshtein scores are calculated and then files are paired by highest score,
-// ensuring each removed file matches at most one added file.
+// It uses the Hungarian algorithm to find the globally optimal assignment that
+// maximizes the total similarity score, with sparse representations and heuristics
+// to avoid O(n³) runtime for large inputs.
 func combineReports(ctx context.Context, c malcontent.Config, removed, added *orderedmap.OrderedMap[string, *malcontent.FileReport]) []malcontent.CombinedReport {
 	if ctx.Err() != nil {
 		return nil
 	}
 
-	type scoredPair struct {
-		rpath string
-		rfr   *malcontent.FileReport
-		apath string
-		afr   *malcontent.FileReport
-		score float64
-	}
-
-	allPairs := make([]scoredPair, 0, removed.Len()*added.Len())
+	// Build index maps for O(1) lookup
+	removedPaths := make([]string, 0, removed.Len())
+	removedFRs := make([]*malcontent.FileReport, 0, removed.Len())
 	for r := removed.Oldest(); r != nil; r = r.Next() {
-		for a := added.Oldest(); a != nil; a = a.Next() {
-			// when not using ScoreAll, only compute distances for files matching scoreFile patterns
-			if !c.ScoreAll && !scoreFile(r.Value, a.Value) {
-				continue
-			}
-			// avoid the CPU cycles involved in scoring files with identical names
-			// since the score would be 1.0 indicating a perfect match
-			var score float64
-			if filepath.Base(r.Key) == filepath.Base(a.Key) {
-				score = 1.0
-			} else {
-				score = levenshtein.Match(filepath.Base(r.Key), filepath.Base(a.Key), levenshtein.NewParams())
-			}
-			allPairs = append(allPairs, scoredPair{
-				rpath: r.Key,
-				rfr:   r.Value,
-				apath: a.Key,
-				afr:   a.Value,
-				score: score,
-			})
-		}
+		removedPaths = append(removedPaths, r.Key)
+		removedFRs = append(removedFRs, r.Value)
 	}
 
-	// sort pairs by score descending, then by path for deterministic ordering
-	slices.SortFunc(allPairs, func(a, b scoredPair) int {
-		if a.score != b.score {
-			if a.score > b.score {
-				return -1
-			}
-			return 1
-		}
-		// for equal scores, sort by removed path, then added path
-		if a.rpath != b.rpath {
-			if a.rpath < b.rpath {
-				return -1
-			}
-			return 1
-		}
-		if a.apath < b.apath {
-			return -1
-		}
-		if a.apath > b.apath {
-			return 1
-		}
-		return 0
-	})
+	addedPaths := make([]string, 0, added.Len())
+	addedFRs := make([]*malcontent.FileReport, 0, added.Len())
+	for a := added.Oldest(); a != nil; a = a.Next() {
+		addedPaths = append(addedPaths, a.Key)
+		addedFRs = append(addedFRs, a.Value)
+	}
 
-	// once a removed or added file is used, don't use reuse it
-	usedRemoved := make(map[string]bool)
-	usedAdded := make(map[string]bool)
+	// Build sparse matrix with scoring function that respects scoreFile patterns
+	scoreFunc := func(rpath, apath string) (float64, bool) {
+		// Find the FileReports for these paths
+		var rfr, afr *malcontent.FileReport
+		for i, p := range removedPaths {
+			if p == rpath {
+				rfr = removedFRs[i]
+				break
+			}
+		}
+		for i, p := range addedPaths {
+			if p == apath {
+				afr = addedFRs[i]
+				break
+			}
+		}
+
+		// When not using ScoreAll, only compute distances for files matching scoreFile patterns
+		if !c.ScoreAll && (rfr == nil || afr == nil || !scoreFile(rfr, afr)) {
+			return 0, false
+		}
+
+		return computeLevenshteinScore(rpath, apath), true
+	}
+
+	entries := buildSparseMatrix(removedPaths, addedPaths, scoreFunc)
+
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Use optimal assignment (Hungarian or greedy fallback based on size)
+	assignment := optimalAssignment(entries, len(removedPaths), len(addedPaths))
+
+	// Build combined reports from assignment
 	combined := make([]malcontent.CombinedReport, 0, min(removed.Len(), added.Len()))
 
-	for _, pair := range allPairs {
-		if usedRemoved[pair.rpath] || usedAdded[pair.apath] {
-			continue
+	// Create a score lookup map from sparse entries
+	scoreMap := make(map[int]map[int]float64)
+	for _, e := range entries {
+		if scoreMap[e.Row] == nil {
+			scoreMap[e.Row] = make(map[int]float64)
 		}
-		usedRemoved[pair.rpath] = true
-		usedAdded[pair.apath] = true
-		combined = append(combined, malcontent.CombinedReport{
-			Added:     pair.apath,
-			AddedFR:   pair.afr,
-			Removed:   pair.rpath,
-			RemovedFR: pair.rfr,
-			Score:     pair.score,
-		})
+		scoreMap[e.Row][e.Col] = e.Score
+	}
+
+	for i, j := range assignment.RowToCol {
+		if j >= 0 && j < len(addedPaths) {
+			score := 0.0
+			if scoreMap[i] != nil {
+				score = scoreMap[i][j]
+			}
+			combined = append(combined, malcontent.CombinedReport{
+				Added:     addedPaths[j],
+				AddedFR:   addedFRs[j],
+				Removed:   removedPaths[i],
+				RemovedFR: removedFRs[i],
+				Score:     score,
+			})
+		}
 	}
 
 	return combined
