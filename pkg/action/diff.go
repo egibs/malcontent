@@ -16,12 +16,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/agext/levenshtein"
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/malcontent/pkg/archive"
 	"github.com/chainguard-dev/malcontent/pkg/malcontent"
 	"github.com/chainguard-dev/malcontent/pkg/programkind"
 	"github.com/chainguard-dev/malcontent/pkg/report"
+	"github.com/hbollon/go-edlib"
 	orderedmap "github.com/wk8/go-ordered-map/v2"
 	"golang.org/x/sync/errgroup"
 )
@@ -558,7 +558,7 @@ func combineReports(ctx context.Context, c malcontent.Config, removed, added *or
 		rfr   *malcontent.FileReport
 		apath string
 		afr   *malcontent.FileReport
-		score float64
+		score float32
 	}
 
 	allPairs := make([]scoredPair, 0, removed.Len()*added.Len())
@@ -570,11 +570,16 @@ func combineReports(ctx context.Context, c malcontent.Config, removed, added *or
 			}
 			// avoid the CPU cycles involved in scoring files with identical names
 			// since the score would be 1.0 indicating a perfect match
-			var score float64
+			var score float32
 			if filepath.Base(r.Key) == filepath.Base(a.Key) {
 				score = 1.0
 			} else {
-				score = levenshtein.Match(filepath.Base(r.Key), filepath.Base(a.Key), levenshtein.NewParams())
+				var err error
+				score, err = edlib.StringsSimilarity(filepath.Base(r.Key), filepath.Base(a.Key), edlib.JaroWinkler)
+				// retain a score of 0.0 if we encounter an error
+				if err != nil {
+					continue
+				}
 			}
 			allPairs = append(allPairs, scoredPair{
 				rpath: r.Key,
@@ -643,7 +648,7 @@ func inferMoves(ctx context.Context, c malcontent.Config, d *malcontent.DiffRepo
 	}
 }
 
-func fileMove(ctx context.Context, c malcontent.Config, fr, tr *malcontent.FileReport, rpath, apath string, d *malcontent.DiffReport, score float64, src ScanResult, dest ScanResult, archiveOrImage, isReport bool) {
+func fileMove(ctx context.Context, c malcontent.Config, fr, tr *malcontent.FileReport, rpath, apath string, d *malcontent.DiffReport, score float32, src ScanResult, dest ScanResult, archiveOrImage, isReport bool) {
 	if ctx.Err() != nil {
 		return
 	}

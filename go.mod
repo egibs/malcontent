@@ -4,7 +4,6 @@ go 1.25.0
 
 require (
 	github.com/VirusTotal/yara-x/go v1.10.0
-	github.com/agext/levenshtein v1.2.3
 	github.com/cavaliergopher/cpio v1.0.1
 	github.com/cavaliergopher/rpm v1.3.0
 	github.com/chainguard-dev/clog v1.8.0
@@ -17,6 +16,7 @@ require (
 	github.com/gabriel-vasile/mimetype v1.4.12
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-containerregistry v0.20.7
+	github.com/hbollon/go-edlib v1.7.0
 	github.com/klauspost/compress v1.18.2
 	github.com/klauspost/pgzip v1.2.6
 	github.com/minio/sha256-simd v1.0.1
