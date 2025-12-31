@@ -4,7 +4,6 @@ go 1.25.0
 
 require (
 	github.com/VirusTotal/yara-x/go v1.10.0
-	github.com/agext/levenshtein v1.2.3
 	github.com/cavaliergopher/cpio v1.0.1
 	github.com/cavaliergopher/rpm v1.3.0
 	github.com/chainguard-dev/clog v1.8.0
@@ -26,6 +25,7 @@ require (
 	github.com/urfave/cli/v3 v3.6.1
 	github.com/wk8/go-ordered-map/v2 v2.1.8
 	golang.org/x/sync v0.19.0
+	golang.org/x/sys v0.39.0
 	golang.org/x/term v0.38.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -75,7 +75,6 @@ require (
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	golang.org/x/crypto v0.46.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
