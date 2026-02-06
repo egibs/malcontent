@@ -107,11 +107,14 @@ var Levels = map[string]int{
 
 func thirdPartyKey(path string, rule string) string {
 	// include the directory
-	yaraIndex := strings.Index(path, "yara/")
-	if yaraIndex == -1 {
+	_, afterYara, found := strings.Cut(path, "yara/")
+	if !found {
 		return ""
 	}
-	subDir := path[yaraIndex+5 : strings.IndexByte(path[yaraIndex+5:], '/')+yaraIndex+5]
+	subDir, _, found := strings.Cut(afterYara, "/")
+	if !found || subDir == "" {
+		return ""
+	}
 
 	// ELASTIC_Linux_Trojan_Gafgyt_E4A1982B
 	// Start with words from the rule name, not including subDir yet
@@ -169,7 +172,7 @@ func thirdPartyKey(path string, rule string) string {
 	// All keepWords are part of the rule name
 	ruleName := keepWords
 
-	return fmt.Sprintf("3P/%s/%s", src, strings.Join(ruleName, "_"))
+	return strings.TrimRight(fmt.Sprintf("3P/%s/%s", src, strings.Join(ruleName, "_")), "/")
 }
 
 // thirdParty returns whether the rule is sourced from a 3rd party.
@@ -188,7 +191,9 @@ func generateKey(src string, rule string) string {
 	}
 
 	key := strings.ReplaceAll(src, "-", "_")
-	key = strings.ReplaceAll(key, ".yara", "")
+	for strings.Contains(key, ".yara") {
+		key = strings.ReplaceAll(key, ".yara", "")
+	}
 
 	// Reduce stutter: if the rule is prefixed with the directory name, remove the prefix
 
@@ -210,7 +215,11 @@ func generateKey(src string, rule string) string {
 		}
 	}
 
-	return strings.TrimSuffix(strings.Join(dirParts, "/"), "/")
+	result := strings.TrimRight(strings.Join(dirParts, "/"), "/")
+	for strings.Contains(result, ".yara") {
+		result = strings.ReplaceAll(result, ".yara", "")
+	}
+	return result
 }
 
 func generateRuleURL(src string, rule string) string {
