@@ -111,11 +111,12 @@ out/$(SAMPLES_REPO)/.decompressed-$(SAMPLES_COMMIT): out/${SAMPLES_REPO}/.git/co
 
 out/$(YARA_X_REPO)/.git/commit-$(YARA_X_COMMIT):
 	mkdir -p out/$(YARA_X_REPO)
-	test -d out/$(YARA_X_REPO)/.git ||git clone https://github.com/$(YARA_X_REPO).git out/$(YARA_X_REPO)
+	test -d out/$(YARA_X_REPO)/.git || git clone https://github.com/$(YARA_X_REPO).git out/$(YARA_X_REPO)
 	rm out/$(YARA_X_REPO)/.git/commit-* 2>/dev/null || true
 	git -C out/$(YARA_X_REPO) switch - || true
 	git -C out/$(YARA_X_REPO) pull --rebase --autostash
 	git -C out/$(YARA_X_REPO) checkout $(YARA_X_COMMIT)
+	git -C out/$(YARA_X_REPO) cherry-pick 5da189ec4075cf943472c251fa72aa406ebbe57b
 	touch out/$(YARA_X_REPO)/.git/commit-$(YARA_X_COMMIT)
 
 samples: out/$(SAMPLES_REPO)/.decompressed-$(SAMPLES_COMMIT)
@@ -126,7 +127,7 @@ install-yara-x: out/$(YARA_X_REPO)/.git/commit-$(YARA_X_COMMIT)
 	mkdir -p out/include
 	cd out/$(YARA_X_REPO) && \
 	cargo install cargo-c --locked && \
-	cargo cinstall -p yara-x-capi --features=native-code-serialization --release --prefix="$(LINT_ROOT)/out" --libdir="$(LINT_ROOT)/out/lib"
+	RUSTFLAGS="-C target-feature=+crt-static" cargo cinstall -p yara-x-capi --features=native-code-serialization --profile release-lto --prefix="$(LINT_ROOT)/out" --libdir="$(LINT_ROOT)/out/lib" --crt-static --library-type="staticlib"
 
 .PHONY: update-deps
 update-deps:
@@ -255,7 +256,7 @@ bench-windows:
 .PHONY: out/mal
 out/mal:
 	mkdir -p out
-	CGO_LDFLAGS="-L$(LINT_ROOT)/out/lib -Wl,-rpath,$(LINT_ROOT)/out/lib" \
+	CGO_LDFLAGS="-L$(LINT_ROOT)/out/lib -Wl,-rpath,$(LINT_ROOT)/out/lib,-lyara_x_capi,-no-pie" \
 	CGO_CPPFLAGS="-I$(LINT_ROOT)/out/include" \
 	PKG_CONFIG_PATH="$(LINT_ROOT)/out/lib/pkgconfig" \
 	go build -o out/mal ./cmd/mal
